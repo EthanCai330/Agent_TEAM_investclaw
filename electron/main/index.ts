@@ -2,7 +2,7 @@
  * Electron Main Process Entry
  * Manages window creation, system tray, and IPC handlers
  */
-import { app, BrowserWindow, nativeImage, session, shell } from 'electron';
+import { app, BrowserWindow, nativeImage, nativeTheme, session, shell } from 'electron';
 import type { Server } from 'node:http';
 import { join } from 'path';
 import { GatewayManager } from '../gateway/manager';
@@ -39,6 +39,7 @@ import { getSetting } from '../utils/store';
 import { ensureBuiltinSkillsInstalled, ensurePreinstalledSkillsInstalled } from '../utils/skill-config';
 import { ensureAllBundledPluginsInstalled } from '../utils/plugin-install';
 import { startHostApiServer } from '../api/server';
+import { pumpReadyAgentClusterChildren, recordAgentClusterRuntimeEvent } from '../utils/agent-clusters';
 import { HostEventBus } from '../api/event-bus';
 import { deviceOAuthManager } from '../utils/device-oauth';
 import { browserOAuthManager } from '../utils/browser-oauth';
@@ -174,6 +175,10 @@ function createWindow(): BrowserWindow {
     },
     titleBarStyle: isMac ? 'hiddenInset' : useCustomTitleBar ? 'hidden' : 'default',
     trafficLightPosition: isMac ? { x: 16, y: 16 } : undefined,
+    transparent: isMac,
+    backgroundColor: isMac ? '#00000000' : undefined,
+    vibrancy: isMac ? 'sidebar' : undefined,
+    visualEffectState: isMac ? 'followWindow' : undefined,
     frame: isMac || !useCustomTitleBar,
     show: false,
   });
@@ -298,6 +303,8 @@ async function initialize(): Promise<void> {
     logger.info('Running in E2E mode: startup side effects minimized');
   }
 
+  nativeTheme.themeSource = await getSetting('theme');
+
   // Set application menu
   createMenu();
 
@@ -399,10 +406,30 @@ async function initialize(): Promise<void> {
 
   gatewayManager.on('notification', (notification) => {
     hostEventBus.emit('gateway:notification', notification);
+    void recordAgentClusterRuntimeEvent(notification, hostEventBus).then((cluster) => {
+      if (cluster && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('agent-cluster:updated', { cluster });
+      }
+      if (cluster?.activeRunId) {
+        void pumpReadyAgentClusterChildren(cluster.clusterId, cluster.activeRunId, gatewayManager, hostEventBus);
+      }
+    }).catch((error) => {
+      logger.warn('Failed to record agent cluster gateway notification:', error);
+    });
   });
 
   gatewayManager.on('chat:message', (data) => {
     hostEventBus.emit('gateway:chat-message', data);
+    void recordAgentClusterRuntimeEvent(data, hostEventBus).then((cluster) => {
+      if (cluster && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('agent-cluster:updated', { cluster });
+      }
+      if (cluster?.activeRunId) {
+        void pumpReadyAgentClusterChildren(cluster.clusterId, cluster.activeRunId, gatewayManager, hostEventBus);
+      }
+    }).catch((error) => {
+      logger.warn('Failed to record agent cluster chat message:', error);
+    });
   });
 
   gatewayManager.on('channel:status', (data) => {

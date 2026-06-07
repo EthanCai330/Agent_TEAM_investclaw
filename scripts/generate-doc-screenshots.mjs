@@ -32,16 +32,6 @@ const locales = [
       cron: '定时任务',
     },
   },
-  {
-    code: 'ja',
-    label: '日本語',
-    dir: 'jp',
-    titles: {
-      channels: 'メッセージングチャンネル',
-      skills: 'スキル',
-      cron: '定期タスク',
-    },
-  },
 ];
 
 async function allocatePort() {
@@ -142,6 +132,21 @@ async function generateLocaleScreenshots(locale) {
     await setWindowSize(electronApp);
     await prepareLocale(page, locale);
 
+    await page.getByTestId('sidebar-nav-agent-clusters').click();
+    await page.getByTestId('agent-clusters-page').waitFor({ state: 'visible', timeout: 30_000 });
+    await captureMainLayout(page, join(screenshotRoot, locale.dir, 'agent-cluster-create.png'));
+
+    await page.getByTestId('agent-cluster-task-goal').fill(
+      locale.code === 'zh'
+        ? '为 AI 半导体主题创建一个多 Agent 投研流程，包含研究、执行、审查和汇总。'
+        : 'Create a multi-agent investment research workflow for the AI semiconductor theme.',
+    );
+    await page.getByTestId('agent-cluster-create-button').click();
+    await page.getByTestId('agent-cluster-detail-page').waitFor({ state: 'visible', timeout: 30_000 });
+    await page.getByTestId('agent-cluster-graph').waitFor({ state: 'visible', timeout: 30_000 });
+    await captureMainLayout(page, join(screenshotRoot, locale.dir, 'agent-cluster-workspace.png'));
+
+    await page.getByTestId('sidebar-new-chat').click();
     await page.getByTestId('chat-quick-action-askQuestions').waitFor({ state: 'visible', timeout: 30_000 });
     await captureMainLayout(page, join(screenshotRoot, locale.dir, 'chat.png'));
 

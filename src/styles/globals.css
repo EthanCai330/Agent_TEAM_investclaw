@@ -4,48 +4,68 @@
 
 @layer base {
   :root {
-    --background: 42 38% 94%;
-    --foreground: 222.2 84% 4.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
-    --primary: 154 41% 28%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 50 40% 92%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 48 32% 92%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 48 46% 88%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
+    color-scheme: light;
+    --background: 220 10% 96%;
+    --foreground: 220 9% 10%;
+    --card: 220 14% 99%;
+    --card-foreground: 220 9% 10%;
+    --popover: 220 14% 99%;
+    --popover-foreground: 220 9% 10%;
+    --primary: 220 9% 12%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 9% 92%;
+    --secondary-foreground: 220 9% 14%;
+    --muted: 220 8% 93%;
+    --muted-foreground: 220 5% 42%;
+    --accent: 220 8% 91%;
+    --accent-foreground: 220 9% 12%;
+    --destructive: 3 72% 52%;
     --destructive-foreground: 210 40% 98%;
-    --border: 45 24% 84%;
-    --input: 45 24% 84%;
-    --ring: 154 41% 28%;
-    --radius: 0.5rem;
+    --border: 220 8% 82%;
+    --input: 220 8% 79%;
+    --ring: 220 8% 20%;
+    --radius: 0.75rem;
+    --glass: 220 14% 99%;
+    --glass-border: 220 8% 78%;
+    --zone-chat: 220 9% 12%;
+    --zone-cluster: 220 9% 12%;
+    --zone-models: 220 9% 12%;
+    --zone-skills: 220 9% 12%;
+    --zone-cron: 220 9% 12%;
+    --zone-settings: 220 9% 12%;
+    --zone: var(--primary);
   }
 
   .dark {
-    --background: 158 13% 11%;
-    --foreground: 210 20% 96%;
-    --card: 158 10% 14%;
-    --card-foreground: 210 20% 96%;
-    --popover: 158 10% 14%;
-    --popover-foreground: 210 20% 96%;
-    --primary: 149 45% 47%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 158 10% 19%;
-    --secondary-foreground: 210 20% 96%;
-    --muted: 158 10% 19%;
-    --muted-foreground: 220 8% 72%;
-    --accent: 42 24% 24%;
-    --accent-foreground: 210 20% 96%;
-    --destructive: 0 65% 42%;
+    color-scheme: dark;
+    --background: 220 8% 8%;
+    --foreground: 220 8% 94%;
+    --card: 220 7% 12%;
+    --card-foreground: 220 8% 94%;
+    --popover: 220 7% 12%;
+    --popover-foreground: 220 8% 94%;
+    --primary: 220 6% 24%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 6% 17%;
+    --secondary-foreground: 220 8% 92%;
+    --muted: 220 6% 17%;
+    --muted-foreground: 220 5% 66%;
+    --accent: 220 6% 19%;
+    --accent-foreground: 220 8% 94%;
+    --destructive: 3 72% 56%;
     --destructive-foreground: 210 20% 96%;
-    --border: 158 8% 25%;
-    --input: 158 10% 19%;
-    --ring: 149 45% 47%;
+    --border: 220 5% 25%;
+    --input: 220 5% 29%;
+    --ring: 220 8% 78%;
+    --glass: 220 7% 13%;
+    --glass-border: 220 5% 30%;
+    --zone-chat: 220 8% 94%;
+    --zone-cluster: 220 8% 94%;
+    --zone-models: 220 8% 94%;
+    --zone-skills: 220 8% 94%;
+    --zone-cron: 220 8% 94%;
+    --zone-settings: 220 8% 94%;
+    --zone: var(--primary);
   }
 }
 
@@ -54,9 +74,159 @@
     @apply border-border;
   }
 
+  html,
+  body,
+  #root {
+    min-height: 100%;
+    background: transparent;
+  }
+
   body {
-    @apply bg-background text-foreground;
+    @apply text-foreground;
     font-feature-settings: "rlig" 1, "calt" 1;
+    text-rendering: geometricPrecision;
+    letter-spacing: -0.006em;
+  }
+
+  ::selection {
+    background: hsl(var(--foreground) / 0.16);
+    color: hsl(var(--foreground));
+  }
+}
+
+@layer components {
+  .window-material {
+    border-color: hsl(var(--glass-border) / 0.46);
+    background: hsl(var(--glass) / 0.58);
+    box-shadow:
+      inset 0 1px 0 hsl(0 0% 100% / 0.20),
+      0 12px 40px -36px hsl(220 20% 8% / 0.36);
+    -webkit-backdrop-filter: blur(18px) saturate(1.06);
+    backdrop-filter: blur(18px) saturate(1.06);
+  }
+
+  .native-window-material {
+    border-color: hsl(var(--glass-border) / 0.26);
+    background: rgb(255 255 255 / 0.06);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.12),
+      0 12px 40px -36px rgb(0 0 0 / 0.22);
+  }
+
+  .dark .native-window-material {
+    border-color: rgb(255 255 255 / 0.10);
+    background: rgb(10 10 12 / 0.08);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.07),
+      0 12px 40px -36px rgb(0 0 0 / 0.48);
+  }
+
+  .glass-shell,
+  .apple-glass-shell,
+  .console-panel {
+    border: 1px solid hsl(var(--glass-border) / 0.48);
+    background: hsl(var(--glass) / 0.76);
+    box-shadow:
+      0 18px 48px -38px hsl(220 20% 8% / 0.42),
+      inset 0 1px 0 hsl(0 0% 100% / 0.22);
+    -webkit-backdrop-filter: blur(12px) saturate(1.04);
+    backdrop-filter: blur(12px) saturate(1.04);
+  }
+
+  .sidebar-glass {
+    border-right: 1px solid hsl(var(--glass-border) / 0.34);
+    box-shadow:
+      14px 0 42px -36px hsl(220 20% 8% / 0.34),
+      inset -1px 0 0 hsl(0 0% 100% / 0.05),
+      inset 0 1px 0 hsl(0 0% 100% / 0.10);
+  }
+
+  input,
+  textarea,
+  select {
+    color-scheme: inherit;
+  }
+
+  .soft-panel,
+  .apple-panel,
+  .console-panel-quiet {
+    border: 1px solid hsl(var(--border) / 0.58);
+    background: hsl(var(--card) / 0.82);
+    box-shadow:
+      0 12px 30px -28px hsl(220 20% 8% / 0.42),
+      inset 0 1px 0 hsl(0 0% 100% / 0.18);
+  }
+
+  .soft-row,
+  .apple-row,
+  .console-chip {
+    border: 1px solid hsl(var(--border) / 0.48);
+    background: hsl(var(--card) / 0.62);
+    color: hsl(var(--foreground) / 0.86);
+  }
+
+  .zone-chat {
+    --zone: var(--zone-chat);
+  }
+
+  .zone-cluster {
+    --zone: var(--zone-cluster);
+  }
+
+  .zone-models {
+    --zone: var(--zone-models);
+  }
+
+  .zone-skills {
+    --zone: var(--zone-skills);
+  }
+
+  .zone-cron {
+    --zone: var(--zone-cron);
+  }
+
+  .zone-settings {
+    --zone: var(--zone-settings);
+  }
+
+  .zone-active {
+    border-color: hsl(var(--border) / 0.74);
+    background: hsl(var(--card) / 0.88);
+    box-shadow:
+      0 10px 22px -18px hsl(220 20% 8% / 0.28),
+      inset 0 1px 0 hsl(0 0% 100% / 0.16);
+    color: hsl(var(--foreground));
+  }
+
+  .zone-hoverable:hover {
+    border-color: hsl(var(--border) / 0.68);
+    box-shadow:
+      0 14px 28px -22px hsl(220 20% 8% / 0.30),
+      inset 0 1px 0 hsl(0 0% 100% / 0.12);
+    color: hsl(var(--foreground));
+  }
+
+  .zone-icon {
+    color: hsl(var(--foreground) / 0.72);
+  }
+
+  .zone-chip {
+    border: 1px solid hsl(var(--border) / 0.58);
+    background: hsl(var(--card) / 0.54);
+    color: hsl(var(--foreground) / 0.68);
+  }
+
+  .zone-dot {
+    background: hsl(var(--foreground) / 0.46);
+    box-shadow: 0 0 0 3px hsl(var(--foreground) / 0.06);
+  }
+
+  .tinted-panel {
+    border: 1px solid hsl(var(--border) / 0.52);
+    background: hsl(var(--card) / 0.74);
+    box-shadow:
+      0 10px 24px -24px hsl(220 20% 8% / 0.32),
+      inset 0 1px 0 hsl(0 0% 100% / 0.12);
   }
 }
 
@@ -89,17 +259,19 @@
 
 /* Smooth transitions */
 .transition-theme {
-  @apply transition-colors duration-200;
+  @apply transition-colors duration-300;
 }
 
 /* Focus ring */
 .focus-ring {
-  @apply focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2;
+  @apply focus:outline-none focus:ring-2 focus:ring-ring/50 focus:ring-offset-0;
 }
 
 /* Prose styling for markdown */
 .prose {
   line-height: 1.6;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .prose p {

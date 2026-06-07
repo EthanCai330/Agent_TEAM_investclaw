@@ -47,6 +47,12 @@ export interface ChatSession {
   updatedAt?: number;
 }
 
+export interface SessionProjectAssignment {
+  projectKey: string;
+  projectName: string;
+  projectPath?: string | null;
+}
+
 export interface ToolStatus {
   id?: string;
   toolCallId?: string;
@@ -82,6 +88,8 @@ export interface ChatState {
   sessionLabels: Record<string, string>;
   /** Last message timestamp (ms) per session key, used for sorting */
   sessionLastActivity: Record<string, number>;
+  /** Local-only project grouping for sidebar organization */
+  sessionProjects: Record<string, SessionProjectAssignment>;
 
   // Thinking
   showThinking: boolean;
@@ -92,6 +100,10 @@ export interface ChatState {
   switchSession: (key: string) => void;
   newSession: () => void;
   deleteSession: (key: string) => Promise<void>;
+  renameSession: (key: string, label: string) => void;
+  assignSessionToProject: (key: string, project: SessionProjectAssignment) => void;
+  unassignSessionProject: (key: string) => void;
+  unassignSessionsFromProject: (projectKey: string) => void;
   cleanupEmptySession: () => void;
   loadHistory: (quiet?: boolean) => Promise<void>;
   sendMessage: (

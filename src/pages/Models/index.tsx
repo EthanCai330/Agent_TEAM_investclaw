@@ -347,7 +347,7 @@ export function Models() {
                       <div
                         key={`${entry.sessionId}-${entry.timestamp}`}
                         data-testid="token-usage-entry"
-                        className="rounded-2xl bg-transparent border border-black/10 dark:border-white/10 p-5 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                        className="zone-hoverable rounded-2xl border border-black/10 bg-transparent p-5 transition-colors dark:border-white/10"
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">

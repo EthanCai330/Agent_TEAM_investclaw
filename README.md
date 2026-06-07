@@ -6,10 +6,11 @@
 <h1 align="center">InvestClaw</h1>
 
 <p align="center">
-  <strong>The AI Investment Research Desk by arain</strong>
+  <strong>Local-first multi-agent investment research desktop</strong>
 </p>
 
 <p align="center">
+  <a href="#agent-clusters">Agent Clusters</a> •
   <a href="#features">Features</a> •
   <a href="#why-investclaw">Why InvestClaw</a> •
   <a href="#getting-started">Getting Started</a> •
@@ -22,12 +23,12 @@
   <img src="https://img.shields.io/badge/platform-MacOS%20%7C%20Windows%20%7C%20Linux-blue" alt="Platform" />
   <img src="https://img.shields.io/badge/electron-40+-47848F?logo=electron" alt="Electron" />
   <img src="https://img.shields.io/badge/react-19-61DAFB?logo=react" alt="React" />
-  <img src="https://img.shields.io/github/downloads/Arain-sh/InvestClaw/total?color=%23027DEB" alt="Downloads" />
+  <img src="https://img.shields.io/github/downloads/EthanCai330/InvestClaw/total?color=%23027DEB" alt="Downloads" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
 </p>
 
 <p align="center">
-  English | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja-JP.md">日本語</a>
+  English | <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 ---
@@ -40,32 +41,50 @@ Whether you're running a morning market brief, dissecting an earnings release, o
 
 InvestClaw ships with embedded runtime services, multi-provider setup, document skills, and desktop-native controls. You can still fine-tune advanced behavior via **Settings → Advanced → Developer Mode**.
 
+This repository is an Agent Cluster-focused community edition maintained by [EthanCai330](https://github.com/EthanCai330). It is based on the upstream [Arain-sh/InvestClaw](https://github.com/Arain-sh/InvestClaw) project and preserves its MIT license and contributor history.
+
 > InvestClaw is a research assistant. It does not provide financial advice, and you should validate any investment decision independently.
 
 ---
 ## Screenshot
 
 <p align="center">
+  <strong>Agent Cluster workspace</strong><br>
+  <img src="resources/screenshot/en/agent-cluster-workspace.png" style="width: 100%; height: auto;" alt="Agent Cluster workspace">
+</p>
+
+<p align="center">
+  <strong>Create from a task, Markdown, file, or project folder</strong><br>
+  <img src="resources/screenshot/en/agent-cluster-create.png" style="width: 100%; height: auto;" alt="Create an Agent Cluster">
+</p>
+
+<p align="center">
+  <strong>Standalone chat</strong><br>
   <img src="resources/screenshot/en/chat.png" style="width: 100%; height: auto;">
 </p>
 
 <p align="center">
+  <strong>Scheduled tasks</strong><br>
   <img src="resources/screenshot/en/cron.png" style="width: 100%; height: auto;">
 </p>
 
 <p align="center">
+  <strong>Skills</strong><br>
   <img src="resources/screenshot/en/skills.png" style="width: 100%; height: auto;">
 </p>
 
 <p align="center">
+  <strong>Channels</strong><br>
   <img src="resources/screenshot/en/channels.png" style="width: 100%; height: auto;">
 </p>
 
 <p align="center">
+  <strong>Models and providers</strong><br>
   <img src="resources/screenshot/en/models.png" style="width: 100%; height: auto;">
 </p>
 
 <p align="center">
+  <strong>Settings</strong><br>
   <img src="resources/screenshot/en/settings.png" style="width: 100%; height: auto;">
 </p>
 
@@ -100,6 +119,78 @@ Complete the entire setup—from installation to your first AI interaction—thr
 Communicate with AI agents through a modern chat experience. Support for multiple conversation contexts, message history, rich content rendering with Markdown, and direct `@agent` routing in the main composer for multi-agent setups.
 When you target another agent with `@agent`, InvestClaw switches into that agent's own conversation context directly instead of relaying through the default agent. Agent workspaces stay separate by default, and stronger isolation depends on runtime sandbox settings.
 Each agent can also override its own `provider/model` runtime setting; agents without overrides continue inheriting the global default model.
+The sidebar organizes history into Agent Clusters, project folders, and standalone chats. Standalone chats can be dragged into a project folder for local UI organization without moving the underlying OpenClaw transcript files.
+
+## Agent Clusters
+
+Agent Clusters turn a research brief or an existing project into an inspectable multi-agent workflow. The renderer never calls OpenClaw directly: creation, filesystem access, persistence, scheduling, and runtime recovery all stay behind the Host API and Electron main process.
+
+### Create from the context you already have
+
+- **New task:** describe a goal and let the selected AI Provider propose agents, responsibilities, shared context, and a workflow.
+- **Markdown or file:** import an existing specification without moving the source file.
+- **Project folder:** read `README.md` and `HANDOFF.md`, then follow an optional `InvestClaw Directory Manifest` to load declared agent prompts, tools, skills, and context files.
+- **Authoritative prompts:** when the project declares agent prompt files, InvestClaw preserves those definitions and uses the planning model mainly for shared context and orchestration.
+
+Example directory manifest:
+
+```yaml
+agent_prompts:
+  - agents/data_steward.md
+  - agents/factor_generator.md
+agent_tools:
+  - agents/tools/prepare_data.py
+skills:
+  - skills/research/SKILL.md
+context:
+  - core/domain_rules.md
+```
+
+Manifest paths must remain inside the selected project root. Absolute paths, parent-directory traversal, and symlink escapes are rejected.
+
+### Confirm the workflow before it runs
+
+The planning model produces a suggested graph rather than immediately launching every agent. You can move nodes, add or remove edges, change edge types, and configure loop segments before confirming the workflow.
+
+| Edge type | Runtime behavior |
+|-----------|------------------|
+| `blocks` | The downstream agent waits for verified upstream completion |
+| `reviews` | The reviewer must finish before the reviewed path continues |
+| `informs` | Passes context without blocking execution |
+| `reports_to` | Documents reporting flow without imposing order |
+| `writes_to_memory` | Marks a memory handoff without creating a DAG dependency |
+
+Blocking edges must form a valid DAG. Explicit loop components model repeated subchains without introducing an invalid blocking cycle.
+
+### Real child sessions with reliable scheduling
+
+```mermaid
+flowchart LR
+    U["Prompt / Markdown / Project Folder"] --> P["LLM planning"]
+    P --> G["Editable orchestration graph"]
+    G --> C["User confirms workflow"]
+    C --> R["Main-process Run Manager"]
+    R --> A["Agent A child session"]
+    A -->|verified completion| B["Agent B child session"]
+    B -->|verified completion| D["Agent C / downstream sessions"]
+    D --> E["Artifacts, events, summaries"]
+    M["LLM Cluster Manager"] -->|proposal| G
+    M -->|targeted prompt patch| R
+```
+
+- Every business agent runs in a separate OpenClaw child session with its own local context.
+- Shared context contains summaries, decisions, constraints, and artifacts rather than every private message.
+- The Run Manager verifies structured completion signals and expected artifacts before unblocking downstream nodes.
+- Gateway events and transcript reconciliation update the graph automatically; refresh, retry, skip, stop, reset, and resume-from-agent controls remain available.
+- The LLM Cluster Manager converts natural-language changes into a reviewable proposal. Prompt patches, new agents, and graph edits are applied only after confirmation.
+
+### Cluster workspace
+
+The cluster detail view uses three resizable areas: agent status, orchestration graph, and conversation/event stream. The sidebar separates **Agent Clusters**, **project folders**, and **standalone chats**. Standalone chats can be dragged into project folders without moving OpenClaw transcript files.
+
+Agent Cluster planning requires an enabled AI Provider configured in **Settings → AI Providers**. No private model endpoint is bundled or contacted by default.
+
+## More Features
 
 ### 📡 Multi-Channel Management
 Configure and monitor multiple AI channels simultaneously. Each channel operates independently, allowing you to run specialized agents for different tasks.
@@ -145,13 +236,13 @@ In **Settings → General**, you can enable **Launch at system startup** so Inve
 
 #### Pre-built Releases (Recommended)
 
-Download the latest release for your platform from the [Releases](https://github.com/Arain-sh/InvestClaw/releases) page.
+Download the latest release for your platform from the [Releases](https://github.com/EthanCai330/InvestClaw/releases) page.
 
 #### Build from Source
 
 ```bash
 # Clone the repository
-git clone https://github.com/Arain-sh/InvestClaw.git
+git clone https://github.com/EthanCai330/InvestClaw.git
 cd InvestClaw
 
 # Initialize the project
@@ -228,6 +319,7 @@ InvestClaw employs a **dual-process architecture** with a unified host API layer
 │  │              Electron Main Process                          │  │
 │  │  • Window & application lifecycle management               │  │
 │  │  • Gateway process supervision                              │  │
+│  │  • Agent Cluster persistence, DAG scheduling & recovery      │  │
 │  │  • System integration (tray, notifications, keychain)       │  │
 │  │  • Auto-update orchestration                                │  │
 │  └────────────────────────────────────────────────────────────┘  │
@@ -238,6 +330,7 @@ InvestClaw employs a **dual-process architecture** with a unified host API layer
 │  │              React Renderer Process                         │  │
 │  │  • Modern component-based UI (React 19)                     │  │
 │  │  • State management with Zustand                            │  │
+│  │  • Resizable Agent Cluster graph and event workspace         │  │
 │  │  • Unified host-api/api-client calls                        │  │
 │  │  • Rich Markdown rendering                                  │  │
 │  └────────────────────────────────────────────────────────────┘  │
@@ -251,6 +344,7 @@ InvestClaw employs a **dual-process architecture** with a unified host API layer
 │                                                                  │
 │  • hostapi:fetch (Main proxy, avoids CORS in dev/prod)          │
 │  • gateway:httpProxy (Renderer never calls Gateway HTTP direct)  │
+│  • Agent Cluster routes, filesystem boundary & event bridge      │
 │  • Unified error mapping & retry/backoff                         │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
@@ -440,5 +534,5 @@ InvestClaw is released under the [MIT License](LICENSE). You're free to use, mod
 ---
 
 <p align="center">
-  <sub>Built with ❤️ by arain and contributors</sub>
+  <sub>Agent Cluster edition maintained by EthanCai330 · Based on Arain-sh/InvestClaw</sub>
 </p>

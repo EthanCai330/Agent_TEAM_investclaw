@@ -16,6 +16,7 @@ import {
   type ChatState,
   type ContentBlock,
   type RawMessage,
+  type SessionProjectAssignment,
   type ToolStatus,
 } from './chat/types';
 
@@ -24,6 +25,7 @@ export type {
   ChatSession,
   ContentBlock,
   RawMessage,
+  SessionProjectAssignment,
   ToolStatus,
 } from './chat/types';
 
@@ -57,6 +59,63 @@ const HISTORY_LOAD_MIN_INTERVAL_MS = 800;
 const HISTORY_POLL_SILENCE_WINDOW_MS = 2_500;
 const CHAT_EVENT_DEDUPE_TTL_MS = 30_000;
 const _chatEventDedupe = new Map<string, number>();
+const SESSION_LABELS_STORAGE_KEY = 'investclaw:session-labels';
+const SESSION_PROJECTS_STORAGE_KEY = 'investclaw:session-projects';
+
+function loadPersistedSessionLabels(): Record<string, string> {
+  try {
+    if (typeof window === 'undefined') return {};
+    const raw = window.localStorage.getItem(SESSION_LABELS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, String(value)]))
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function persistSessionLabels(labels: Record<string, string>): void {
+  try {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(SESSION_LABELS_STORAGE_KEY, JSON.stringify(labels));
+    }
+  } catch {
+    // Local labels are best-effort UI state.
+  }
+}
+
+function loadPersistedSessionProjects(): Record<string, SessionProjectAssignment> {
+  try {
+    if (typeof window === 'undefined') return {};
+    const raw = window.localStorage.getItem(SESSION_PROJECTS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const entries: Array<[string, SessionProjectAssignment]> = [];
+    for (const [key, value] of Object.entries(parsed)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const record = value as Record<string, unknown>;
+      const projectKey = typeof record.projectKey === 'string' ? record.projectKey.trim() : '';
+      const projectName = typeof record.projectName === 'string' ? record.projectName.trim() : '';
+      if (!projectKey || !projectName) continue;
+      const projectPath = typeof record.projectPath === 'string' ? record.projectPath : null;
+      entries.push([key, { projectKey, projectName, projectPath }]);
+    }
+    return Object.fromEntries(entries);
+  } catch {
+    return {};
+  }
+}
+
+function persistSessionProjects(projects: Record<string, SessionProjectAssignment>): void {
+  try {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(SESSION_PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    }
+  } catch {
+    // Local project assignments are best-effort UI state.
+  }
+}
 
 function clearErrorRecoveryTimer(): void {
   if (_errorRecoveryTimer) {
@@ -680,7 +739,7 @@ function clearSessionEntryFromMap<T extends Record<string, unknown>>(entries: T,
 function buildSessionSwitchPatch(
   state: Pick<
     ChatState,
-    'currentSessionKey' | 'messages' | 'sessions' | 'sessionLabels' | 'sessionLastActivity'
+    'currentSessionKey' | 'messages' | 'sessions' | 'sessionLabels' | 'sessionLastActivity' | 'sessionProjects'
   >,
   nextSessionKey: string,
 ): Partial<ChatState> {
@@ -706,6 +765,9 @@ function buildSessionSwitchPatch(
     sessionLastActivity: leavingEmpty
       ? clearSessionEntryFromMap(state.sessionLastActivity, state.currentSessionKey)
       : state.sessionLastActivity,
+    sessionProjects: leavingEmpty
+      ? clearSessionEntryFromMap(state.sessionProjects, state.currentSessionKey)
+      : state.sessionProjects,
     messages: [],
     streamingText: '',
     streamingMessage: null,
@@ -1002,8 +1064,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   currentSessionKey: DEFAULT_SESSION_KEY,
   currentAgentId: 'main',
-  sessionLabels: {},
+  sessionLabels: loadPersistedSessionLabels(),
   sessionLastActivity: {},
+  sessionProjects: loadPersistedSessionProjects(),
 
   showThinking: true,
   thinkingLevel: null,
@@ -1193,32 +1256,95 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (currentSessionKey === key) {
       // Switched away from deleted session — pick the first remaining or create new
       const next = remaining[0];
-      set((s) => ({
-        sessions: remaining,
-        sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
-        sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
-        messages: [],
-        streamingText: '',
-        streamingMessage: null,
-        streamingTools: [],
-        activeRunId: null,
-        error: null,
-        pendingFinal: false,
-        lastUserMessageAt: null,
-        pendingToolImages: [],
-        currentSessionKey: next?.key ?? DEFAULT_SESSION_KEY,
-        currentAgentId: getAgentIdFromSessionKey(next?.key ?? DEFAULT_SESSION_KEY),
-      }));
+      set((s) => {
+        const sessionProjects = Object.fromEntries(Object.entries(s.sessionProjects).filter(([k]) => k !== key));
+        persistSessionProjects(sessionProjects);
+        return {
+          sessions: remaining,
+          sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
+          sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
+          sessionProjects,
+          messages: [],
+          streamingText: '',
+          streamingMessage: null,
+          streamingTools: [],
+          activeRunId: null,
+          error: null,
+          pendingFinal: false,
+          lastUserMessageAt: null,
+          pendingToolImages: [],
+          currentSessionKey: next?.key ?? DEFAULT_SESSION_KEY,
+          currentAgentId: getAgentIdFromSessionKey(next?.key ?? DEFAULT_SESSION_KEY),
+        };
+      });
       if (next) {
         get().loadHistory();
       }
     } else {
-      set((s) => ({
-        sessions: remaining,
-        sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
-        sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
-      }));
+      set((s) => {
+        const sessionProjects = Object.fromEntries(Object.entries(s.sessionProjects).filter(([k]) => k !== key));
+        persistSessionProjects(sessionProjects);
+        return {
+          sessions: remaining,
+          sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
+          sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
+          sessionProjects,
+        };
+      });
     }
+  },
+
+  renameSession: (key: string, label: string) => {
+    const trimmed = label.trim();
+    set((state) => {
+      const sessionLabels = trimmed
+        ? { ...state.sessionLabels, [key]: trimmed.slice(0, 80) }
+        : Object.fromEntries(Object.entries(state.sessionLabels).filter(([entryKey]) => entryKey !== key));
+      persistSessionLabels(sessionLabels);
+      return { sessionLabels };
+    });
+  },
+
+  assignSessionToProject: (key: string, project: SessionProjectAssignment) => {
+    const projectKey = project.projectKey.trim();
+    const projectName = project.projectName.trim();
+    if (!projectKey || !projectName) return;
+    set((state) => {
+      const sessionProjects = {
+        ...state.sessionProjects,
+        [key]: {
+          projectKey,
+          projectName: projectName.slice(0, 120),
+          projectPath: project.projectPath ?? null,
+        },
+      };
+      persistSessionProjects(sessionProjects);
+      return { sessionProjects };
+    });
+  },
+
+  unassignSessionProject: (key: string) => {
+    set((state) => {
+      const sessionProjects = Object.fromEntries(
+        Object.entries(state.sessionProjects).filter(([entryKey]) => entryKey !== key),
+      );
+      persistSessionProjects(sessionProjects);
+      return { sessionProjects };
+    });
+  },
+
+  unassignSessionsFromProject: (projectKey: string) => {
+    const normalizedProjectKey = projectKey.trim();
+    if (!normalizedProjectKey) return;
+    set((state) => {
+      const sessionProjects = Object.fromEntries(
+        Object.entries(state.sessionProjects).filter(([, assignment]) => (
+          assignment.projectKey !== normalizedProjectKey
+        )),
+      );
+      persistSessionProjects(sessionProjects);
+      return { sessionProjects };
+    });
   },
 
   // ── New session ──
@@ -1239,29 +1365,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ?? DEFAULT_CANONICAL_PREFIX;
     const newKey = `${prefix}:session-${Date.now()}`;
     const newSessionEntry: ChatSession = { key: newKey, displayName: newKey };
-    set((s) => ({
-      currentSessionKey: newKey,
-      currentAgentId: getAgentIdFromSessionKey(newKey),
-      sessions: [
-        ...(leavingEmpty ? s.sessions.filter((sess) => sess.key !== currentSessionKey) : s.sessions),
-        newSessionEntry,
-      ],
-      sessionLabels: leavingEmpty
-        ? Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== currentSessionKey))
-        : s.sessionLabels,
-      sessionLastActivity: leavingEmpty
-        ? Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey))
-        : s.sessionLastActivity,
-      messages: [],
-      streamingText: '',
-      streamingMessage: null,
-      streamingTools: [],
-      activeRunId: null,
-      error: null,
-      pendingFinal: false,
-      lastUserMessageAt: null,
-      pendingToolImages: [],
-    }));
+    set((s) => {
+      const sessionProjects = leavingEmpty
+        ? Object.fromEntries(Object.entries(s.sessionProjects).filter(([k]) => k !== currentSessionKey))
+        : s.sessionProjects;
+      if (leavingEmpty) persistSessionProjects(sessionProjects);
+      return {
+        currentSessionKey: newKey,
+        currentAgentId: getAgentIdFromSessionKey(newKey),
+        sessions: [
+          ...(leavingEmpty ? s.sessions.filter((sess) => sess.key !== currentSessionKey) : s.sessions),
+          newSessionEntry,
+        ],
+        sessionLabels: leavingEmpty
+          ? Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== currentSessionKey))
+          : s.sessionLabels,
+        sessionLastActivity: leavingEmpty
+          ? Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey))
+          : s.sessionLastActivity,
+        sessionProjects,
+        messages: [],
+        streamingText: '',
+        streamingMessage: null,
+        streamingTools: [],
+        activeRunId: null,
+        error: null,
+        pendingFinal: false,
+        lastUserMessageAt: null,
+        pendingToolImages: [],
+      };
+    });
   },
 
   // ── Cleanup empty session on navigate away ──
@@ -1279,15 +1412,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
       && !sessionLastActivity[currentSessionKey]
       && !sessionLabels[currentSessionKey];
     if (!isEmptyNonMain) return;
-    set((s) => ({
-      sessions: s.sessions.filter((sess) => sess.key !== currentSessionKey),
-      sessionLabels: Object.fromEntries(
-        Object.entries(s.sessionLabels).filter(([k]) => k !== currentSessionKey),
-      ),
-      sessionLastActivity: Object.fromEntries(
-        Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey),
-      ),
-    }));
+    set((s) => {
+      const sessionProjects = Object.fromEntries(
+        Object.entries(s.sessionProjects).filter(([k]) => k !== currentSessionKey),
+      );
+      persistSessionProjects(sessionProjects);
+      return {
+        sessions: s.sessions.filter((sess) => sess.key !== currentSessionKey),
+        sessionLabels: Object.fromEntries(
+          Object.entries(s.sessionLabels).filter(([k]) => k !== currentSessionKey),
+        ),
+        sessionLastActivity: Object.fromEntries(
+          Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey),
+        ),
+        sessionProjects,
+      };
+    });
   },
 
   // ── Load chat history ──

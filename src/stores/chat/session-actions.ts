@@ -181,6 +181,9 @@ export function createSessionActions(
           sessionLastActivity: Object.fromEntries(
             Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey),
           ),
+          sessionProjects: Object.fromEntries(
+            Object.entries(s.sessionProjects ?? {}).filter(([k]) => k !== currentSessionKey),
+          ),
         } : {}),
       }));
       get().loadHistory();
@@ -221,6 +224,7 @@ export function createSessionActions(
           sessions: remaining,
           sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
           sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
+          sessionProjects: Object.fromEntries(Object.entries(s.sessionProjects ?? {}).filter(([k]) => k !== key)),
           messages: [],
           streamingText: '',
           streamingMessage: null,
@@ -241,6 +245,7 @@ export function createSessionActions(
           sessions: remaining,
           sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
           sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
+          sessionProjects: Object.fromEntries(Object.entries(s.sessionProjects ?? {}).filter(([k]) => k !== key)),
         }));
       }
     },
@@ -274,6 +279,9 @@ export function createSessionActions(
         sessionLastActivity: leavingEmpty
           ? Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey))
           : s.sessionLastActivity,
+        sessionProjects: leavingEmpty
+          ? Object.fromEntries(Object.entries(s.sessionProjects ?? {}).filter(([k]) => k !== currentSessionKey))
+          : s.sessionProjects,
         messages: [],
         streamingText: '',
         streamingMessage: null,
@@ -308,6 +316,9 @@ export function createSessionActions(
         ),
         sessionLastActivity: Object.fromEntries(
           Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey),
+        ),
+        sessionProjects: Object.fromEntries(
+          Object.entries(s.sessionProjects ?? {}).filter(([k]) => k !== currentSessionKey),
         ),
       }));
     },

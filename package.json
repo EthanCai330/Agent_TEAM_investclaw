@@ -26,16 +26,16 @@
             ]
         }
     },
-    "description": "InvestClaw - AI investment research desk by arain",
+    "description": "InvestClaw - local-first multi-agent investment research desktop",
     "main": "dist-electron/main/index.js",
-    "author": "arain",
-    "homepage": "https://github.com/Arain-sh/InvestClaw#readme",
+    "author": "EthanCai330",
+    "homepage": "https://github.com/EthanCai330/InvestClaw#readme",
     "repository": {
         "type": "git",
-        "url": "git@github.com:Arain-sh/InvestClaw.git"
+        "url": "git@github.com:EthanCai330/InvestClaw.git"
     },
     "bugs": {
-        "url": "https://github.com/Arain-sh/InvestClaw/issues"
+        "url": "https://github.com/EthanCai330/InvestClaw/issues"
     },
     "license": "MIT",
     "private": true,

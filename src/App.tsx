@@ -17,6 +17,7 @@ import { Skills } from './pages/Skills';
 import { Cron } from './pages/Cron';
 import { Settings } from './pages/Settings';
 import { Setup } from './pages/Setup';
+import { AgentClusters } from './pages/AgentClusters';
 import { useSettingsStore } from './stores/settings';
 import { useGatewayStore } from './stores/gateway';
 import { useProviderStore } from './stores/providers';
@@ -184,6 +185,8 @@ function App() {
             <Route path="/channels" element={<Channels />} />
             <Route path="/skills" element={<Skills />} />
             <Route path="/cron" element={<Cron />} />
+            <Route path="/agent-clusters" element={<AgentClusters />} />
+            <Route path="/agent-clusters/:clusterId" element={<AgentClusters />} />
             <Route path="/settings/*" element={<Settings />} />
           </Route>
         </Routes>

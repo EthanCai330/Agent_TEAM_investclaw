@@ -19,6 +19,8 @@ import {
   XCircle,
   ExternalLink,
   Copy,
+  Cpu,
+  Settings2,
 } from 'lucide-react';
 import { TitleBar } from '@/components/layout/TitleBar';
 import { Button } from '@/components/ui/button';
@@ -1172,7 +1174,7 @@ function ProviderContent({
               href={effectiveProviderDocsUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-[13px] text-blue-500 hover:text-blue-600 font-medium inline-flex items-center gap-1"
+              className="inline-flex items-center gap-1 text-[13px] font-medium text-foreground/70 hover:text-foreground"
             >
               {t('settings:aiProviders.dialog.customDoc')}
               <ExternalLink className="h-3 w-3" />
@@ -1200,7 +1202,7 @@ function ProviderContent({
                     className={cn('h-4 w-4 shrink-0', shouldInvertInDark(selectedProviderData.id) && 'dark:invert')}
                   />
                 ) : (
-                  <span className="text-sm leading-none shrink-0">{selectedProviderData.icon}</span>
+                  <Cpu className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
                 )
               ) : (
                 <span className="text-xs text-muted-foreground shrink-0">—</span>
@@ -1244,7 +1246,7 @@ function ProviderContent({
                           className={cn('h-4 w-4 shrink-0', shouldInvertInDark(p.id) && 'dark:invert')}
                         />
                       ) : (
-                        <span className="text-sm leading-none shrink-0">{p.icon}</span>
+                        <Cpu className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
                       )}
                       <span className="truncate">{p.id === 'custom' ? t('settings:aiProviders.custom') : p.name}{p.model ? ` — ${p.model}` : ''}</span>
                     </div>
@@ -1274,7 +1276,7 @@ function ProviderContent({
                     href={selectedProviderData.codePlanDocsUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-[13px] text-blue-500 hover:text-blue-600 font-medium inline-flex items-center gap-1"
+                    className="inline-flex items-center gap-1 text-[13px] font-medium text-foreground/70 hover:text-foreground"
                   >
                     {t('provider.codePlanDoc')}
                     <ExternalLink className="h-3 w-3" />
@@ -1477,14 +1479,14 @@ function ProviderContent({
           {/* Device OAuth Trigger */}
           {useOAuthFlow && (
             <div className="space-y-4 pt-2">
-              <div className="rounded-lg bg-blue-500/10 border border-blue-500/20 p-4 text-center">
-                <p className="text-sm text-blue-200 mb-3 block">
+              <div className="rounded-lg border border-border/60 bg-card/70 p-4 text-center">
+                <p className="mb-3 block text-sm text-muted-foreground">
                   This provider requires signing in via your browser.
                 </p>
                 <Button
                   onClick={handleStartOAuth}
                   disabled={oauthFlowing}
-                  className="w-full bg-blue-600 hover:bg-blue-700 text-white"
+                  className="w-full"
                 >
                   {oauthFlowing ? (
                     <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Waiting...</>
@@ -1540,7 +1542,7 @@ function ProviderContent({
                         />
 
                         <Button
-                          className="w-full bg-blue-600 hover:bg-blue-700 text-white"
+                          className="w-full"
                           onClick={handleSubmitManualOAuthCode}
                           disabled={!manualCodeInput.trim()}
                         >
@@ -1724,7 +1726,9 @@ function InstallingContent({ skills, onComplete, onSkip }: InstallingContentProp
   return (
     <div className="space-y-6">
       <div className="text-center">
-        <div className="text-4xl mb-4">⚙️</div>
+        <div className="mx-auto mb-4 flex h-11 w-11 items-center justify-center rounded-xl border border-border/60 bg-card/75 shadow-sm">
+          <Settings2 className="h-5 w-5 text-muted-foreground" aria-hidden="true" />
+        </div>
         <h2 className="text-xl font-semibold mb-2">{t('installing.title')}</h2>
         <p className="text-muted-foreground">
           {t('installing.subtitle')}
@@ -1831,7 +1835,9 @@ function CompleteContent({ selectedProvider, installedSkills }: CompleteContentP
 
   return (
     <div className="text-center space-y-6">
-      <div className="text-6xl mb-4">🎉</div>
+      <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl border border-border/60 bg-card/75 shadow-sm">
+        <CheckCircle2 className="h-6 w-6 text-foreground/75" aria-hidden="true" />
+      </div>
       <h2 className="text-xl font-semibold">{t('complete.title')}</h2>
       <p className="text-muted-foreground">
         {t('complete.subtitle')}
@@ -1841,7 +1847,7 @@ function CompleteContent({ selectedProvider, installedSkills }: CompleteContentP
         <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50">
           <span>{t('complete.provider')}</span>
           <span className="text-green-400">
-            {providerData ? <span className="flex items-center gap-1.5">{getProviderIconUrl(providerData.id) ? <img src={getProviderIconUrl(providerData.id)} alt={providerData.name} className={`h-4 w-4 inline-block ${shouldInvertInDark(providerData.id) ? 'dark:invert' : ''}`} /> : providerData.icon} {providerData.id === 'custom' ? t('settings:aiProviders.custom') : providerData.name}</span> : '—'}
+            {providerData ? <span className="flex items-center gap-1.5">{getProviderIconUrl(providerData.id) ? <img src={getProviderIconUrl(providerData.id)} alt={providerData.name} className={`h-4 w-4 inline-block ${shouldInvertInDark(providerData.id) ? 'dark:invert' : ''}`} /> : <Cpu className="h-4 w-4" aria-hidden="true" />} {providerData.id === 'custom' ? t('settings:aiProviders.custom') : providerData.name}</span> : '—'}
           </span>
         </div>
         <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50">

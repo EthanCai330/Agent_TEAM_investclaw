@@ -24,11 +24,12 @@ export function ChatToolbar() {
     () => (agents ?? []).find((agent) => agent.id === currentAgentId)?.name ?? currentAgentId,
     [agents, currentAgentId],
   );
+  const currentAgentZone = currentAgentId === 'main' ? 'zone-chat' : 'zone-models';
 
   return (
     <div className="flex items-center gap-2">
-      <div className="hidden sm:flex items-center gap-1.5 rounded-full border border-black/10 bg-white/70 px-3 py-1.5 text-[12px] font-medium text-foreground/80 dark:border-white/10 dark:bg-white/5">
-        <Bot className="h-3.5 w-3.5 text-primary" />
+      <div className={cn(currentAgentZone, 'soft-row hidden items-center gap-1.5 rounded-full px-3 py-1.5 text-[12px] font-medium text-foreground/80 sm:flex')}>
+        <Bot className="h-3.5 w-3.5 zone-icon" />
         <span>{t('toolbar.currentAgent', { agent: currentAgentName })}</span>
       </div>
       {/* Refresh */}
@@ -57,7 +58,7 @@ export function ChatToolbar() {
             size="icon"
             className={cn(
               'h-8 w-8',
-              showThinking && 'bg-primary/10 text-primary',
+              showThinking && 'zone-chat zone-active',
             )}
             onClick={toggleThinking}
           >
