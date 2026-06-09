@@ -53,7 +53,7 @@ npmRebuild: false
 # Auto-update configuration
 publish:
   - provider: github
-    owner: EthanCai330
+    owner: Arain-sh
     repo: InvestClaw
 
 # macOS Configuration
@@ -156,14 +156,14 @@ linux:
       arch:
         - x64
   category: Utility
-  maintainer: EthanCai330
-  vendor: EthanCai330
-  synopsis: Local-first multi-agent investment research desktop
+  maintainer: arain
+  vendor: arain
+  synopsis: AI investment research desk by arain
   description: InvestClaw is a desktop investment research workspace for market analysis, filings review, watchlists, and multi-step portfolio workflows.
   desktop:
     entry:
       Name: InvestClaw
-      Comment: Local-first multi-agent investment research desktop
+      Comment: AI investment research desk by arain
       Categories: Utility;Network;
       Keywords: ai;investment;research;markets;automation;
       StartupWMClass: investclaw

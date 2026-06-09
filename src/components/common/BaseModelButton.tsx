@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown, Cpu } from 'lucide-react';
-import { DEFAULT_PROVIDER_BASE_MODEL, useBaseModelStore, type BaseModelConfig } from '@/stores/base-model';
+import { GLM_5_1_BASE_MODEL, useBaseModelStore, type BaseModelConfig } from '@/stores/base-model';
 import { useProviderStore } from '@/stores/providers';
 import { cn } from '@/lib/utils';
 
@@ -56,7 +56,7 @@ export function BaseModelButton({ compact = false, className }: BaseModelButtonP
   }, [accounts, statuses, vendors]);
 
   const options = useMemo(
-    () => [DEFAULT_PROVIDER_BASE_MODEL, ...accountOptions],
+    () => [GLM_5_1_BASE_MODEL, ...accountOptions],
     [accountOptions],
   );
 
@@ -76,7 +76,7 @@ export function BaseModelButton({ compact = false, className }: BaseModelButtonP
           'hover:bg-black/5 dark:border-white/10 dark:hover:bg-white/5',
           className,
         )}
-        title={`${selectedModel.label} · ${selectedModel.baseUrl || selectedModel.accountId || '使用设置中的默认账号'}`}
+        title={`${selectedModel.label} · ${selectedModel.baseUrl || selectedModel.accountId || 'provider account'}`}
       >
         <Cpu className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         <span className="truncate">{compact ? selectedModel.label : `基模：${selectedModel.label}`}</span>
@@ -106,7 +106,7 @@ export function BaseModelButton({ compact = false, className }: BaseModelButtonP
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-medium text-foreground">{model.label}</span>
                     <span className="block truncate text-[11px] text-muted-foreground">
-                      {model.baseUrl || (model.accountId ? `Provider account: ${model.accountId}` : '使用设置中的默认 Provider')}
+                      {model.baseUrl || (model.accountId ? `Provider account: ${model.accountId}` : '未配置 baseUrl')}
                     </span>
                   </span>
                   {selected && <Check className="mt-0.5 h-4 w-4 shrink-0" />}

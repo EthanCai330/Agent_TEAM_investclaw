@@ -6,6 +6,7 @@ import type { GatewayManager } from '../gateway/manager';
 import type { HostEventBus } from '../api/event-bus';
 import { getProviderService } from '../services/providers/provider-service';
 import { getProviderConfig } from './provider-registry';
+import { getOpenClawConfigDir } from './paths';
 
 type AgentClusterSourceType = 'new_task' | 'existing_task';
 type AgentClusterStatus = 'idle' | 'running' | 'waiting' | 'done' | 'error';
@@ -42,6 +43,22 @@ export type AgentClusterInferredKind = 'data' | 'factor' | 'evaluation' | 'memor
 type AgentClusterCreationStageStatus = 'pending' | 'running' | 'completed' | 'error';
 type AgentClusterCreationStatusValue = 'running' | 'completed' | 'error';
 type AgentClusterManagerProposalStatus = 'pending' | 'applied' | 'dismissed';
+type AgentClusterWorkflowStatus = 'draft' | 'confirmed' | 'archived';
+type WorkflowNodeType = 'agent' | 'fan_out' | 'join' | 'gate' | 'review' | 'reduce' | 'loop' | 'human_gate';
+type WorkflowNodeRunStatus =
+  | 'pending'
+  | 'ready'
+  | 'running'
+  | 'waiting'
+  | 'waiting_human'
+  | 'completed'
+  | 'failed'
+  | 'skipped'
+  | 'aborted'
+  | 'recovering';
+type WorkflowFailureAction = 'pause' | 'retry' | 'skip' | 'fail_run';
+type WorkflowJoinMode = 'all' | 'minimum';
+type WorkflowGateKind = 'completion' | 'artifact' | 'count' | 'schema';
 type AgentClusterCreationStageId =
   | 'read_source'
   | 'prepare_context'
@@ -89,12 +106,14 @@ interface AgentClusterEvent {
   title: string;
   content: string;
   level: 'info' | 'success' | 'warning' | 'error';
+  display?: 'visible' | 'silent';
   raw?: unknown;
   createdAt: string;
 }
 
 interface AgentClusterChildRun {
   agentId: string;
+  workflowNodeId?: string;
   sessionKey: string;
   runId: string;
   status: AgentClusterRunStatus;
@@ -149,6 +168,13 @@ interface AgentClusterRun {
   completedAt?: string;
   error?: string;
   timeoutAt?: string;
+  workflowSnapshot?: AgentClusterWorkflow;
+  nodeRuns?: WorkflowNodeRun[];
+  checkpoint?: WorkflowCheckpoint;
+  harnessStatus?: 'running' | 'paused' | 'waiting_human' | 'completed' | 'failed' | 'aborted';
+  pauseRequestedAt?: string;
+  stopRequestedAt?: string;
+  stoppedAt?: string;
 }
 
 interface AgentMessage {
@@ -236,6 +262,136 @@ interface AgentClusterExecutionGraph {
   updatedAt: string;
 }
 
+interface WorkflowRetryPolicy {
+  maxAttempts: number;
+  backoffMs: number;
+  failureAction: WorkflowFailureAction;
+}
+
+interface WorkflowInputContract {
+  requiredNodeIds?: string[];
+  requiredArtifacts?: string[];
+  schema?: Record<string, unknown>;
+}
+
+interface WorkflowOutputContract {
+  requiredArtifacts?: string[];
+  minimumCount?: number;
+  schema?: Record<string, unknown>;
+}
+
+interface WorkflowNodeBase {
+  nodeId: string;
+  type: WorkflowNodeType;
+  name: string;
+  description?: string;
+  x?: number;
+  y?: number;
+  timeoutMs?: number;
+  retryPolicy?: WorkflowRetryPolicy;
+  inputContract?: WorkflowInputContract;
+  outputContract?: WorkflowOutputContract;
+}
+
+interface WorkflowAgentNode extends WorkflowNodeBase {
+  type: 'agent' | 'review' | 'reduce';
+  agentId: string;
+  reviewTargetNodeIds?: string[];
+  reviseTargetNodeId?: string;
+}
+
+interface WorkflowFanOutNode extends WorkflowNodeBase {
+  type: 'fan_out';
+  concurrency: number;
+}
+
+interface WorkflowJoinNode extends WorkflowNodeBase {
+  type: 'join';
+  mode: WorkflowJoinMode;
+  minimumSuccess?: number;
+}
+
+interface WorkflowGateNode extends WorkflowNodeBase {
+  type: 'gate';
+  gateKind: WorkflowGateKind;
+  minimumCount?: number;
+}
+
+interface WorkflowLoopNode extends WorkflowNodeBase {
+  type: 'loop';
+  bodyNodeIds: string[];
+  repeatCount: number;
+  exitGateNodeId?: string;
+}
+
+interface WorkflowHumanGateNode extends WorkflowNodeBase {
+  type: 'human_gate';
+  prompt: string;
+}
+
+type WorkflowNode =
+  | WorkflowAgentNode
+  | WorkflowFanOutNode
+  | WorkflowJoinNode
+  | WorkflowGateNode
+  | WorkflowLoopNode
+  | WorkflowHumanGateNode;
+
+interface WorkflowEdge {
+  edgeId: string;
+  fromNodeId: string;
+  toNodeId: string;
+  kind: 'control' | 'data';
+  label?: string;
+}
+
+interface WorkflowPolicy {
+  maxConcurrency: number;
+  defaultTimeoutMs: number;
+  defaultRetryPolicy: WorkflowRetryPolicy;
+}
+
+interface AgentClusterWorkflow {
+  workflowId: string;
+  version: number;
+  status: AgentClusterWorkflowStatus;
+  createdBy: 'planner' | 'manager' | 'user' | 'migration';
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+  policy: WorkflowPolicy;
+  createdAt: string;
+  updatedAt: string;
+  confirmedAt?: string;
+}
+
+interface WorkflowNodeRun {
+  nodeId: string;
+  status: WorkflowNodeRunStatus;
+  attempt: number;
+  startedAt?: string;
+  updatedAt: string;
+  completedAt?: string;
+  input?: Record<string, unknown>;
+  output?: Record<string, unknown>;
+  error?: string;
+  waitingReason?: string;
+  tokenUsage?: {
+    input?: number;
+    output?: number;
+    total?: number;
+  };
+}
+
+interface WorkflowCheckpoint {
+  checkpointId: string;
+  runId: string;
+  workflowId: string;
+  workflowVersion: number;
+  status: 'running' | 'paused' | 'completed' | 'failed' | 'aborted';
+  nodeRuns: WorkflowNodeRun[];
+  createdAt: string;
+}
+
 interface AgentClusterManagerPromptPatchDraft {
   targetAgentId?: string | null;
   targetAgentName?: string | null;
@@ -264,6 +420,21 @@ interface AgentClusterManagerEdgeDraft {
   reason?: string;
 }
 
+interface AgentClusterManagerWorkflowNodeDraft {
+  type: 'fan_out' | 'join' | 'gate' | 'loop' | 'human_gate';
+  name: string;
+  description?: string;
+  upstreamAgentNames?: string[];
+  downstreamAgentNames?: string[];
+  concurrency?: number;
+  joinMode?: WorkflowJoinMode;
+  minimumSuccess?: number;
+  gateKind?: WorkflowGateKind;
+  minimumCount?: number;
+  repeatCount?: number;
+  prompt?: string;
+}
+
 interface AgentClusterManagerProposal {
   proposalId: string;
   reply: string;
@@ -271,6 +442,7 @@ interface AgentClusterManagerProposal {
   promptPatches: AgentClusterManagerPromptPatchDraft[];
   agentDrafts: AgentClusterManagerAgentDraft[];
   edgeDrafts: AgentClusterManagerEdgeDraft[];
+  workflowNodeDrafts?: AgentClusterManagerWorkflowNodeDraft[];
   sharedContextSummary?: string;
   recommendedResumeFromAgentId?: string | null;
   recommendedResumeFromAgentName?: string | null;
@@ -338,6 +510,8 @@ export interface AgentCluster {
   agents: ClusterAgent[];
   edges: AgentEdge[];
   executionGraph?: AgentClusterExecutionGraph;
+  workflows?: AgentClusterWorkflow[];
+  currentWorkflowId?: string | null;
   orchestrationConfirmedAt?: string | null;
   messages: AgentMessage[];
   runs?: AgentClusterRun[];
@@ -370,13 +544,26 @@ export interface SendAgentClusterManagerMessageInput {
   baseProviderAccountId?: string;
 }
 
+export interface CreateAgentClusterAgentInput {
+  name: string;
+  role: string;
+  description?: string;
+  systemPrompt?: string;
+  responsibilities?: string[];
+  tools?: string[];
+  capabilities?: string[];
+}
+
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_FOLDER_FILE_BYTES = 512 * 1024;
 const RUN_TIMEOUT_MS = 45 * 60 * 1000;
+const RUN_TIMEOUT_RECOVERY_MS = 30 * 60 * 1000;
 const LLM_PLANNING_TIMEOUT_MS = 4 * 60 * 1000;
 const LLM_MANAGER_TIMEOUT_MS = 2 * 60 * 1000;
 const RUN_WATCHDOG_INTERVAL_MS = 5 * 1000;
 const CHILD_NO_EVENT_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_WORKFLOW_CONCURRENCY = 4;
+const MAX_WORKFLOW_LOOP_COUNT = 20;
 
 function getStorePath(): string {
   return join(app.getPath('userData'), 'agent-clusters.json');
@@ -556,6 +743,294 @@ function buildExecutionGraph(agents: ClusterAgent[], edges: AgentEdge[], confirm
   };
 }
 
+function defaultWorkflowPolicy(): WorkflowPolicy {
+  return {
+    maxConcurrency: DEFAULT_WORKFLOW_CONCURRENCY,
+    defaultTimeoutMs: RUN_TIMEOUT_MS,
+    defaultRetryPolicy: {
+      maxAttempts: 2,
+      backoffMs: 1_000,
+      failureAction: 'pause',
+    },
+  };
+}
+
+function workflowAgentNodeId(agentId: string): string {
+  return `agent:${agentId}`;
+}
+
+function workflowNodeIsAgent(node: WorkflowNode): node is WorkflowAgentNode {
+  return node.type === 'agent' || node.type === 'review' || node.type === 'reduce';
+}
+
+function inferWorkflowAgentNodeType(agent: ClusterAgent, incomingEdges: AgentEdge[]): WorkflowAgentNode['type'] {
+  const identity = `${agent.name} ${agent.role}`.toLowerCase();
+  if (
+    incomingEdges.some((edge) => normalizeExecutionType(edge) === 'reviews')
+    && /review|audit|审查|审核/.test(identity)
+  ) return 'review';
+  if (incomingEdges.length > 1 || /reduce|synth|汇总|综合|dad|总工/.test(identity)) return 'reduce';
+  return 'agent';
+}
+
+export function buildWorkflowFromExecutionGraph(
+  clusterId: string,
+  agents: ClusterAgent[],
+  graph: AgentClusterExecutionGraph,
+  createdBy: AgentClusterWorkflow['createdBy'],
+  version = 1,
+  now = new Date().toISOString(),
+): AgentClusterWorkflow {
+  const blockingEdges = graph.edges.filter(isBlockingExecutionEdge);
+  const incomingByAgent = new Map<string, AgentEdge[]>();
+  for (const agent of agents) incomingByAgent.set(agent.agentId, []);
+  for (const edge of blockingEdges) {
+    incomingByAgent.get(edge.toAgentId)?.push(edge);
+  }
+
+  const nodes: WorkflowNode[] = agents.map((agent) => ({
+    nodeId: workflowAgentNodeId(agent.agentId),
+    type: inferWorkflowAgentNodeType(agent, incomingByAgent.get(agent.agentId) ?? []),
+    name: agent.name,
+    description: agent.description,
+    agentId: agent.agentId,
+    x: graph.nodes.find((node) => node.agentId === agent.agentId)?.x,
+    y: graph.nodes.find((node) => node.agentId === agent.agentId)?.y,
+    retryPolicy: defaultWorkflowPolicy().defaultRetryPolicy,
+    outputContract: {
+      requiredArtifacts: expectedArtifactNamesForAgent(agent),
+    },
+  }));
+  const edges: WorkflowEdge[] = [];
+
+  const rootAgentIds = agents
+    .filter((agent) => (incomingByAgent.get(agent.agentId)?.length ?? 0) === 0)
+    .map((agent) => agent.agentId);
+  if (rootAgentIds.length > 1) {
+    const fanOutId = `fan-out:${clusterId}`;
+    nodes.push({
+      nodeId: fanOutId,
+      type: 'fan_out',
+      name: '并行分发',
+      description: `并行启动 ${rootAgentIds.length} 个无阻塞上游的 Agent`,
+      concurrency: DEFAULT_WORKFLOW_CONCURRENCY,
+    });
+    for (const agentId of rootAgentIds) {
+      edges.push({
+        edgeId: randomUUID(),
+        fromNodeId: fanOutId,
+        toNodeId: workflowAgentNodeId(agentId),
+        kind: 'control',
+      });
+    }
+  }
+
+  for (const agent of agents) {
+    const incoming = incomingByAgent.get(agent.agentId) ?? [];
+    if (incoming.length === 0) continue;
+    const targetNodeId = workflowAgentNodeId(agent.agentId);
+    const joinNodeId = incoming.length > 1 ? `join:${agent.agentId}` : null;
+    if (joinNodeId) {
+      nodes.push({
+        nodeId: joinNodeId,
+        type: 'join',
+        name: `${agent.name} 上游汇合`,
+        description: `等待 ${incoming.length} 个阻塞上游全部完成`,
+        mode: 'all',
+      });
+      edges.push({
+        edgeId: randomUUID(),
+        fromNodeId: joinNodeId,
+        toNodeId: targetNodeId,
+        kind: 'control',
+      });
+    }
+    for (const edge of incoming) {
+      const gateNodeId = `gate:${edge.edgeId}`;
+      const upstream = agents.find((item) => item.agentId === edge.fromAgentId);
+      nodes.push({
+        nodeId: gateNodeId,
+        type: 'gate',
+        name: `${upstream?.name ?? '上游'} 完成验证`,
+        description: edge.reason || '验证上游完成信号和约定产物',
+        gateKind: expectedArtifactNamesForAgent(upstream).length > 0 ? 'artifact' : 'completion',
+        inputContract: {
+          requiredNodeIds: [workflowAgentNodeId(edge.fromAgentId)],
+          requiredArtifacts: upstream ? expectedArtifactNamesForAgent(upstream) : [],
+        },
+      });
+      edges.push(
+        {
+          edgeId: randomUUID(),
+          fromNodeId: workflowAgentNodeId(edge.fromAgentId),
+          toNodeId: gateNodeId,
+          kind: 'control',
+          label: edge.executionType,
+        },
+        {
+          edgeId: randomUUID(),
+          fromNodeId: gateNodeId,
+          toNodeId: joinNodeId ?? targetNodeId,
+          kind: 'control',
+        },
+      );
+    }
+  }
+
+  for (const edge of graph.edges.filter((item) => !isBlockingExecutionEdge(item))) {
+    edges.push({
+      edgeId: randomUUID(),
+      fromNodeId: workflowAgentNodeId(edge.fromAgentId),
+      toNodeId: workflowAgentNodeId(edge.toAgentId),
+      kind: 'data',
+      label: edge.executionType,
+    });
+  }
+
+  for (const loop of graph.loops ?? []) {
+    const bodyAgentIds = getBlockingPathAgentIds(
+      {
+        clusterId,
+        agents,
+        edges: graph.edges,
+        executionGraph: graph,
+      } as AgentCluster,
+      loop.startAgentId,
+      loop.endAgentId,
+    );
+    nodes.push({
+      nodeId: `loop:${loop.loopId}`,
+      type: 'loop',
+      name: '循环',
+      description: `${bodyAgentIds.length} 个 Agent 重复 ${loop.repeatCount} 轮`,
+      bodyNodeIds: bodyAgentIds.map(workflowAgentNodeId),
+      repeatCount: Math.min(MAX_WORKFLOW_LOOP_COUNT, loop.repeatCount),
+    });
+  }
+
+  return {
+    workflowId: `workflow-${randomUUID()}`,
+    version,
+    status: 'draft',
+    createdBy,
+    nodes,
+    edges,
+    policy: defaultWorkflowPolicy(),
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function normalizeWorkflow(cluster: AgentCluster, workflow: AgentClusterWorkflow): AgentClusterWorkflow {
+  const agentIds = new Set(cluster.agents.map((agent) => agent.agentId));
+  const agentById = new Map(cluster.agents.map((agent) => [agent.agentId, agent]));
+  const seenNodeIds = new Set<string>();
+  const nodes = (Array.isArray(workflow.nodes) ? workflow.nodes : [])
+    .filter((node) => {
+      if (!node?.nodeId || seenNodeIds.has(node.nodeId)) return false;
+      if (workflowNodeIsAgent(node) && !agentIds.has(node.agentId)) return false;
+      seenNodeIds.add(node.nodeId);
+      return true;
+    })
+    .map((node) => {
+      if (node.type === 'fan_out') {
+        return { ...node, concurrency: Math.max(1, Math.min(16, Math.floor(node.concurrency || DEFAULT_WORKFLOW_CONCURRENCY))) };
+      }
+      if (node.type === 'loop') {
+        return { ...node, repeatCount: Math.max(1, Math.min(MAX_WORKFLOW_LOOP_COUNT, Math.floor(node.repeatCount || 1))) };
+      }
+      if (node.type === 'join') {
+        return {
+          ...node,
+          mode: node.mode === 'minimum' ? 'minimum' as const : 'all' as const,
+          minimumSuccess: node.mode === 'minimum' ? Math.max(1, Math.floor(node.minimumSuccess || 1)) : undefined,
+        };
+      }
+      if (node.type === 'review') {
+        const agent = agentById.get(node.agentId);
+        const identity = `${agent?.name ?? node.name} ${agent?.role ?? ''}`.toLowerCase();
+        const isEvaluationAgent = /evaluation|evaluator|评估/.test(identity);
+        const isExplicitReviewer = /review|reviewer|审查|审核/.test(identity);
+        if (isEvaluationAgent && !isExplicitReviewer && !node.reviewTargetNodeIds?.length && !node.reviseTargetNodeId) {
+          return { ...node, type: 'agent' as const };
+        }
+      }
+      return node;
+    });
+  const nodeIds = new Set(nodes.map((node) => node.nodeId));
+  const edgeKeys = new Set<string>();
+  const edges = (Array.isArray(workflow.edges) ? workflow.edges : [])
+    .filter((edge) => {
+      if (!nodeIds.has(edge.fromNodeId) || !nodeIds.has(edge.toNodeId) || edge.fromNodeId === edge.toNodeId) return false;
+      const key = `${edge.fromNodeId}:${edge.toNodeId}:${edge.kind}`;
+      if (edgeKeys.has(key)) return false;
+      edgeKeys.add(key);
+      return true;
+    })
+    .map((edge) => ({ ...edge, edgeId: edge.edgeId || randomUUID(), kind: edge.kind === 'data' ? 'data' as const : 'control' as const }));
+  return {
+    ...workflow,
+    version: Math.max(1, Math.floor(workflow.version || 1)),
+    status: workflow.status === 'confirmed' || workflow.status === 'archived' ? workflow.status : 'draft',
+    nodes,
+    edges,
+    policy: {
+      ...defaultWorkflowPolicy(),
+      ...(workflow.policy ?? {}),
+      maxConcurrency: Math.max(1, Math.min(16, Math.floor(workflow.policy?.maxConcurrency || DEFAULT_WORKFLOW_CONCURRENCY))),
+    },
+  };
+}
+
+function getCurrentWorkflow(cluster: AgentCluster): AgentClusterWorkflow {
+  const workflows = cluster.workflows ?? [];
+  const selected = workflows.find((workflow) => workflow.workflowId === cluster.currentWorkflowId)
+    ?? workflows.find((workflow) => workflow.status === 'confirmed')
+    ?? workflows[0];
+  if (selected) return selected;
+  return buildWorkflowFromExecutionGraph(
+    cluster.clusterId,
+    cluster.agents,
+    normalizeExecutionGraph(cluster),
+    'migration',
+    1,
+    cluster.updatedAt,
+  );
+}
+
+function assertWorkflowValid(cluster: AgentCluster, workflow: AgentClusterWorkflow): void {
+  const normalized = normalizeWorkflow(cluster, workflow);
+  const nodeIds = new Set(normalized.nodes.map((node) => node.nodeId));
+  const adjacency = new Map<string, string[]>();
+  for (const nodeId of nodeIds) adjacency.set(nodeId, []);
+  for (const edge of normalized.edges) {
+    if (edge.kind === 'control') adjacency.get(edge.fromNodeId)?.push(edge.toNodeId);
+  }
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (nodeId: string): void => {
+    if (visiting.has(nodeId)) throw new Error('Workflow 控制边存在环路，请使用 Loop 节点表达循环');
+    if (visited.has(nodeId)) return;
+    visiting.add(nodeId);
+    for (const next of adjacency.get(nodeId) ?? []) visit(next);
+    visiting.delete(nodeId);
+    visited.add(nodeId);
+  };
+  for (const nodeId of nodeIds) visit(nodeId);
+  for (const node of normalized.nodes) {
+    if (node.type === 'loop') {
+      if (node.bodyNodeIds.length === 0) throw new Error(`Loop 节点 ${node.name} 尚未选择循环主体`);
+      if (node.bodyNodeIds.some((nodeId) => !nodeIds.has(nodeId))) {
+        throw new Error(`Loop 节点 ${node.name} 引用了不存在的节点`);
+      }
+    }
+    if (node.type === 'join' && node.mode === 'minimum') {
+      const incoming = normalized.edges.filter((edge) => edge.kind === 'control' && edge.toNodeId === node.nodeId).length;
+      if ((node.minimumSuccess ?? 1) > incoming) throw new Error(`Join 节点 ${node.name} 的最少成功数超过上游数量`);
+    }
+  }
+}
+
 function normalizeExecutionLoops(cluster: AgentCluster, loops: unknown): AgentClusterExecutionLoop[] {
   if (!Array.isArray(loops)) return [];
   const agentIds = new Set(cluster.agents.map((agent) => agent.agentId));
@@ -651,6 +1126,20 @@ function assertBlockingDag(cluster: AgentCluster, graph: AgentClusterExecutionGr
 function normalizeCluster(cluster: AgentCluster): AgentCluster {
   const normalizedEdges = (cluster.edges ?? []).map(normalizeEdge);
   const normalizedGraph = normalizeExecutionGraph({ ...cluster, edges: normalizedEdges });
+  const sourceWorkflows = Array.isArray(cluster.workflows) && cluster.workflows.length > 0
+    ? cluster.workflows
+    : [buildWorkflowFromExecutionGraph(
+      cluster.clusterId,
+      cluster.agents ?? [],
+      normalizedGraph,
+      'migration',
+      1,
+      cluster.updatedAt,
+    )];
+  const normalizedWorkflows = sourceWorkflows.map((workflow) => normalizeWorkflow(cluster, workflow));
+  const currentWorkflowId = normalizedWorkflows.some((workflow) => workflow.workflowId === cluster.currentWorkflowId)
+    ? cluster.currentWorkflowId
+    : normalizedWorkflows.find((workflow) => workflow.status === 'confirmed')?.workflowId ?? normalizedWorkflows[0]?.workflowId ?? null;
   const projectRoot = cluster.projectRoot
     ?? cluster.sourceFolderPath
     ?? (cluster.sourcePath ? dirname(cluster.sourcePath) : null);
@@ -666,6 +1155,8 @@ function normalizeCluster(cluster: AgentCluster): AgentCluster {
     events: Array.isArray(cluster.events) ? cluster.events : [],
     edges: normalizedEdges,
     executionGraph: normalizedGraph,
+    workflows: normalizedWorkflows,
+    currentWorkflowId,
     orchestrationConfirmedAt: cluster.orchestrationConfirmedAt ?? null,
     runs: Array.isArray(cluster.runs)
       ? cluster.runs.map((run) => ({
@@ -690,6 +1181,15 @@ function normalizeCluster(cluster: AgentCluster): AgentCluster {
           artifacts: Array.isArray(child.artifacts) ? child.artifacts : [],
           expectedArtifacts: Array.isArray(child.expectedArtifacts) ? child.expectedArtifacts : [],
         })),
+        workflowSnapshot: run.workflowSnapshot ? normalizeWorkflow(cluster, run.workflowSnapshot) : undefined,
+        nodeRuns: Array.isArray(run.nodeRuns) ? run.nodeRuns : [],
+        harnessStatus: run.harnessStatus ?? (run.status === 'completed'
+          ? 'completed'
+          : run.status === 'aborted'
+            ? 'aborted'
+            : run.status === 'error' || run.status === 'timeout'
+              ? 'failed'
+              : 'running'),
         submittedChildCount: run.submittedChildCount ?? (run.childRuns ?? []).filter((child) => child.submitStatus === 'submitted' || child.runId).length,
         completedChildCount: run.completedChildCount ?? (run.childRuns ?? []).filter((child) => child.status === 'completed').length,
         failedChildCount: run.failedChildCount ?? (run.childRuns ?? []).filter((child) => child.status === 'error' || child.status === 'timeout').length,
@@ -982,6 +1482,31 @@ interface LlmClusterPlan {
     label?: string;
     reason?: string;
   }>;
+  workflow?: {
+    nodes?: Array<{
+      key?: string;
+      type?: WorkflowNodeType;
+      name?: string;
+      description?: string;
+      agentName?: string;
+      concurrency?: number;
+      joinMode?: WorkflowJoinMode;
+      minimumSuccess?: number;
+      gateKind?: WorkflowGateKind;
+      minimumCount?: number;
+      bodyAgentNames?: string[];
+      repeatCount?: number;
+      prompt?: string;
+      requiredArtifacts?: string[];
+    }>;
+    edges?: Array<{
+      from?: string;
+      to?: string;
+      kind?: 'control' | 'data';
+      label?: string;
+    }>;
+    policy?: Partial<WorkflowPolicy>;
+  };
 }
 
 interface SourceSection {
@@ -1006,6 +1531,7 @@ interface LlmManagerDecision {
   promptPatches?: AgentClusterManagerPromptPatchDraft[];
   agentDrafts?: AgentClusterManagerAgentDraft[];
   edgeDrafts?: AgentClusterManagerEdgeDraft[];
+  workflowNodeDrafts?: AgentClusterManagerWorkflowNodeDraft[];
   sharedContextUpdates?: {
     facts?: string[];
     decisions?: string[];
@@ -1149,19 +1675,6 @@ function normalizeAgentNameForMatch(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '');
 }
 
-function requirePlanningEndpoint(
-  accountLabel: string,
-  baseUrl: string | undefined,
-  model: string | undefined,
-): { baseUrl: string; model: string } {
-  const normalizedBaseUrl = baseUrl?.trim();
-  const normalizedModel = model?.trim();
-  if (!normalizedBaseUrl || !normalizedModel) {
-    throw new Error(`AI Provider“${accountLabel}”缺少 Base URL 或模型配置，请先在“设置 → AI Providers”中补全。`);
-  }
-  return { baseUrl: normalizedBaseUrl, model: normalizedModel };
-}
-
 async function resolvePlanningModel(input: CreateAgentClusterInput): Promise<{
   baseUrl: string;
   model: string;
@@ -1170,6 +1683,23 @@ async function resolvePlanningModel(input: CreateAgentClusterInput): Promise<{
 }> {
   const providerService = getProviderService();
   const baseModel = input.baseModel;
+  const resolveAccountModel = async (accountId: string) => {
+    const account = await providerService.getAccount(accountId);
+    if (!account?.enabled) return null;
+    const vendorConfig = getProviderConfig(account.vendorId);
+    const baseUrl = account.baseUrl || vendorConfig?.baseUrl;
+    const model = account.model || vendorConfig?.models?.[0]?.id;
+    if (!baseUrl || !model) {
+      throw new Error('Selected AI Provider is missing a base URL or model. Configure it in Settings > AI Providers.');
+    }
+    const apiKey = await providerService.getLegacyProviderApiKey(account.id);
+    return {
+      baseUrl,
+      model,
+      apiKey: apiKey || 'investclaw-local',
+      headers: account.headers ?? {},
+    };
+  };
   if (baseModel?.provider === 'custom-openai-compatible') {
     const baseUrl = baseModel.baseUrl?.trim();
     const model = baseModel.model?.trim();
@@ -1178,45 +1708,19 @@ async function resolvePlanningModel(input: CreateAgentClusterInput): Promise<{
     }
   }
   if (baseModel?.provider === 'provider-account' && baseModel.accountId) {
-    const account = await providerService.getAccount(baseModel.accountId);
-    if (account?.enabled) {
-      const vendorConfig = getProviderConfig(account.vendorId);
-      const apiKey = await providerService.getLegacyProviderApiKey(account.id);
-      const endpoint = requirePlanningEndpoint(
-        account.label,
-        baseModel.baseUrl || account.baseUrl || vendorConfig?.baseUrl,
-        baseModel.model || account.model || vendorConfig?.models?.[0]?.id,
-      );
-      return {
-        ...endpoint,
-        apiKey: apiKey || 'investclaw-local',
-        headers: account.headers ?? {},
-      };
-    }
-    throw new Error('选择的 AI Provider 不存在或已停用，请重新选择基模。');
+    const configured = await resolveAccountModel(baseModel.accountId);
+    if (configured) return configured;
   }
   const accountId = input.baseProviderAccountId || await providerService.getDefaultAccountId();
   if (!accountId) {
-    throw new Error('尚未配置默认 AI Provider，请先前往“设置 → AI Providers”添加并启用一个账号。');
+    throw new Error('Agent Cluster planning requires an enabled AI Provider. Configure one in Settings > AI Providers.');
   }
 
-  const account = await providerService.getAccount(accountId);
-  if (!account || !account.enabled) {
-    throw new Error('默认 AI Provider 不存在或已停用，请在“设置 → AI Providers”中重新选择。');
+  const configured = await resolveAccountModel(accountId);
+  if (!configured) {
+    throw new Error('Agent Cluster planning requires an enabled AI Provider. Configure one in Settings > AI Providers.');
   }
-
-  const vendorConfig = getProviderConfig(account.vendorId);
-  const apiKey = await providerService.getLegacyProviderApiKey(account.id);
-  const endpoint = requirePlanningEndpoint(
-    account.label,
-    account.baseUrl || vendorConfig?.baseUrl,
-    account.model || vendorConfig?.models?.[0]?.id,
-  );
-  return {
-    ...endpoint,
-    apiKey: apiKey || 'investclaw-local',
-    headers: account.headers ?? {},
-  };
+  return configured;
 }
 
 function buildPlanningPrompt(sourceContent: string): string {
@@ -1228,10 +1732,13 @@ function buildPlanningPrompt(sourceContent: string): string {
   return [
     '你是 InvestClaw 的 Agent 集群规划器。请根据用户给定的任务资料，拆解出一个可运行的多 Agent 集群。',
     '只返回 JSON，不要 Markdown，不要解释。',
-    'JSON 字段：globalGoal, decompositionPlan, constraints, facts, openQuestions, agents, edges。',
+    'JSON 字段：globalGoal, decompositionPlan, constraints, facts, openQuestions, agents, edges, workflow。',
     'agents 每项包含 name, role, description, responsibilities, systemPrompt, tools, capabilities。',
     'edges 每项包含 fromAgentName, toAgentName, relationType(depends_on/reviews/delegates_to/reports_to/collaborates_with), executionType(blocks/informs/reviews/reports_to/writes_to_memory), isBlocking, label, reason。',
     '只有 executionType=blocks 或 reviews 表示执行顺序依赖；informs/reports_to/writes_to_memory 只表示上下文传递或图谱展示。',
+    'workflow 是可执行 Workflow IR：nodes, edges, policy。节点 type 只能是 agent/fan_out/join/gate/review/reduce/loop/human_gate。',
+    'workflow.nodes 每项使用稳定 key；Agent/Review/Reduce 节点必须提供 agentName；Gate 只能使用 completion/artifact/count/schema；Loop repeatCount 不得超过 20。',
+    'workflow.edges 只通过 from/to 引用节点 key，kind 只能是 control/data。policy 只能设置 maxConcurrency、defaultTimeoutMs 和允许的重试策略，不得包含代码。',
     sourceAgents.length > 0
       ? `检测到目录内已有 agents/*.md 权威 Agent 定义：${sourceAgentSummary}。agents 字段必须使用这些现成 Agent，不要新增、改名或重写 systemPrompt；systemPrompt 可留空，系统会使用 agents/*.md 原文。`
       : '如果没有现成 agents/*.md，请根据任务资料生成合理 Agent。',
@@ -1243,6 +1750,119 @@ function buildPlanningPrompt(sourceContent: string): string {
     '任务资料：',
     sourceContent,
   ].join('\n');
+}
+
+function buildWorkflowFromPlan(
+  plan: LlmClusterPlan,
+  clusterId: string,
+  agents: ClusterAgent[],
+  fallback: AgentClusterWorkflow,
+  now: string,
+): AgentClusterWorkflow {
+  const plannedNodes = Array.isArray(plan.workflow?.nodes) ? plan.workflow.nodes : [];
+  if (plannedNodes.length === 0) return fallback;
+  const keyToNodeId = new Map<string, string>();
+  const nodes: WorkflowNode[] = [];
+  for (const [index, planned] of plannedNodes.entries()) {
+    const type = planned.type;
+    if (!type || !['agent', 'fan_out', 'join', 'gate', 'review', 'reduce', 'loop', 'human_gate'].includes(type)) continue;
+    const key = planned.key?.trim() || `node-${index + 1}`;
+    if (keyToNodeId.has(key)) continue;
+    const agent = type === 'agent' || type === 'review' || type === 'reduce'
+      ? findAgentByPlanName(planned.agentName, agents)
+      : null;
+    if ((type === 'agent' || type === 'review' || type === 'reduce') && !agent) continue;
+    const nodeId = agent ? workflowAgentNodeId(agent.agentId) : `${type}:${randomUUID()}`;
+    if (nodes.some((node) => node.nodeId === nodeId)) {
+      keyToNodeId.set(key, nodeId);
+      continue;
+    }
+    keyToNodeId.set(key, nodeId);
+    const base = {
+      nodeId,
+      type,
+      name: compactText(planned.name?.trim() || agent?.name || workflowNodeLabelsForPrompt(type), 100),
+      description: planned.description?.trim(),
+      outputContract: planned.requiredArtifacts?.length
+        ? { requiredArtifacts: coerceStringArray(planned.requiredArtifacts) }
+        : agent
+          ? { requiredArtifacts: expectedArtifactNamesForAgent(agent) }
+          : undefined,
+    };
+    const node: WorkflowNode = type === 'agent' || type === 'review' || type === 'reduce'
+      ? { ...base, type, agentId: agent!.agentId }
+      : type === 'fan_out'
+        ? { ...base, type, concurrency: Math.max(1, Math.min(16, Math.floor(planned.concurrency || DEFAULT_WORKFLOW_CONCURRENCY))) }
+        : type === 'join'
+          ? { ...base, type, mode: planned.joinMode === 'minimum' ? 'minimum' : 'all', minimumSuccess: planned.minimumSuccess }
+          : type === 'gate'
+            ? { ...base, type, gateKind: planned.gateKind ?? 'completion', minimumCount: planned.minimumCount }
+            : type === 'loop'
+              ? {
+                  ...base,
+                  type,
+                  bodyNodeIds: coerceStringArray(planned.bodyAgentNames)
+                    .map((name) => findAgentByPlanName(name, agents)?.agentId)
+                    .filter((agentId): agentId is string => Boolean(agentId))
+                    .map(workflowAgentNodeId),
+                  repeatCount: Math.max(1, Math.min(MAX_WORKFLOW_LOOP_COUNT, Math.floor(planned.repeatCount || 1))),
+                }
+              : { ...base, type: 'human_gate', prompt: planned.prompt?.trim() || '请确认是否继续执行。' };
+    nodes.push(node);
+  }
+  for (const agent of agents) {
+    if (nodes.some((node) => workflowNodeIsAgent(node) && node.agentId === agent.agentId)) continue;
+    nodes.push({
+      nodeId: workflowAgentNodeId(agent.agentId),
+      type: 'agent',
+      name: agent.name,
+      description: agent.description,
+      agentId: agent.agentId,
+      outputContract: { requiredArtifacts: expectedArtifactNamesForAgent(agent) },
+    });
+  }
+  const nodeIds = new Set(nodes.map((node) => node.nodeId));
+  const edges = (plan.workflow?.edges ?? []).map((edge) => {
+    const fromNodeId = keyToNodeId.get(edge.from?.trim() || '');
+    const toNodeId = keyToNodeId.get(edge.to?.trim() || '');
+    if (!fromNodeId || !toNodeId || fromNodeId === toNodeId || !nodeIds.has(fromNodeId) || !nodeIds.has(toNodeId)) return null;
+    return {
+      edgeId: randomUUID(),
+      fromNodeId,
+      toNodeId,
+      kind: edge.kind === 'data' ? 'data' as const : 'control' as const,
+      label: edge.label?.trim(),
+    };
+  }).filter((edge): edge is WorkflowEdge => Boolean(edge));
+  if (edges.length === 0) return fallback;
+  return {
+    workflowId: `workflow-${randomUUID()}`,
+    version: 1,
+    status: 'draft',
+    createdBy: 'planner',
+    nodes,
+    edges,
+    policy: {
+      ...defaultWorkflowPolicy(),
+      ...(plan.workflow?.policy ?? {}),
+      maxConcurrency: Math.max(1, Math.min(16, Math.floor(plan.workflow?.policy?.maxConcurrency || DEFAULT_WORKFLOW_CONCURRENCY))),
+    },
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function workflowNodeLabelsForPrompt(type: WorkflowNodeType): string {
+  switch (type) {
+    case 'fan_out': return '并行分发';
+    case 'join': return '结果汇合';
+    case 'gate': return '确定性门禁';
+    case 'review': return '审查';
+    case 'reduce': return '综合';
+    case 'loop': return '循环';
+    case 'human_gate': return '人工确认';
+    default: return 'Agent';
+  }
 }
 
 async function requestClusterPlanFromLlm(
@@ -1327,10 +1947,12 @@ function buildManagerPrompt(cluster: AgentCluster, content: string): string {
     '你的职责：理解用户自然语言改动，生成“待确认提案”。用户确认前，任何 prompt、Agent、边或运行状态都不会被正式修改。',
     '你不是底层调度器；blocks/reviews 的硬调度由系统 Run Manager 执行。不要伪造已完成状态。',
     '只返回 JSON，不要 Markdown，不要解释。',
-    'JSON 字段：reply, targetAgentIds, targetAgentNames, promptPatches, agentDrafts, edgeDrafts, sharedContextUpdates, sharedContextSummary, recommendedResumeFromAgentId, recommendedResumeFromAgentName, runDecision。',
+    'JSON 字段：reply, targetAgentIds, targetAgentNames, promptPatches, agentDrafts, edgeDrafts, workflowNodeDrafts, sharedContextUpdates, sharedContextSummary, recommendedResumeFromAgentId, recommendedResumeFromAgentName, runDecision。',
     'promptPatches 每项包含 targetAgentId 或 targetAgentName，以及 instruction。',
     'agentDrafts 用于用户要求新增 Agent；每项包含 name, role, description, responsibilities, systemPrompt, tools, capabilities。',
     'edgeDrafts 用于新增/修改协作关系；每项包含 fromAgentName/fromAgentId, toAgentName/toAgentId, relationType, executionType, isBlocking, label, reason。',
+    'workflowNodeDrafts 只能使用 fan_out/join/gate/loop/human_gate；每项包含 type, name, description, upstreamAgentNames, downstreamAgentNames，以及该类型允许的 concurrency/joinMode/minimumSuccess/gateKind/minimumCount/repeatCount/prompt。',
+    '不要生成 JavaScript、Shell 或任意条件表达式；Gate 只能选择 completion/artifact/count/schema。',
     '如果用户要求“加一个 Agent / 新增 Agent / 插入一个步骤”，请生成 agentDrafts 和必要 edgeDrafts，而不是只写一段全局说明。',
     '如果用户是在修正路径、参数、格式、评估规则、产物位置，请优先定向到最相关 Agent，而不是泛化为全局。',
     '如果集群来自目录模式且 Agent prompt 源自 agents/*.md，不要重写 Agent 的完整职责；应生成精简、定向的 prompt patch。',
@@ -1614,6 +2236,9 @@ async function buildClusterFromSource(
     .map((agent, index) => `${index + 1}. ${agent.name}：${agent.description}`)
     .join('\n');
   const edges = buildEdgesFromPlan(plan ?? {}, agents);
+  const executionGraph = buildExecutionGraph(agents, edges, false, now);
+  const fallbackWorkflow = buildWorkflowFromExecutionGraph(clusterId, agents, executionGraph, 'planner', 1, now);
+  const workflow = buildWorkflowFromPlan(plan ?? {}, clusterId, agents, fallbackWorkflow, now);
   onStage?.('build_agents', 'completed', `已生成 ${agents.length} 个 Agent`);
   const messages = [
     makeMessage(clusterId, {
@@ -1675,7 +2300,9 @@ async function buildClusterFromSource(
     },
     agents,
     edges,
-    executionGraph: buildExecutionGraph(agents, edges, false, now),
+    executionGraph,
+    workflows: [workflow],
+    currentWorkflowId: workflow.workflowId,
     orchestrationConfirmedAt: null,
     messages,
     runs: [],
@@ -1921,7 +2548,7 @@ function getTextFromRuntimePayload(payload: unknown): string {
   return '';
 }
 
-function summarizeRuntimeEvent(payload: unknown): Omit<AgentClusterEvent, 'eventId' | 'clusterId' | 'createdAt' | 'runId' | 'agentId'> {
+export function summarizeRuntimeEvent(payload: unknown): Omit<AgentClusterEvent, 'eventId' | 'clusterId' | 'createdAt' | 'runId' | 'agentId'> {
   const raw = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
   const method = String(raw.method ?? raw.type ?? raw.event ?? '').toLowerCase();
   const params = raw.params && typeof raw.params === 'object' ? raw.params as Record<string, unknown> : raw;
@@ -1944,7 +2571,13 @@ function summarizeRuntimeEvent(payload: unknown): Omit<AgentClusterEvent, 'event
   if (/assistant|message|chat|delta/.test(method) && text) {
     return { title: 'Agent 输出', content: text, level: 'info', raw: payload };
   }
-  return { title: '子会话活动', content: text || 'Agent 子会话正在运行', level: 'info', raw: payload };
+  return {
+    title: '子会话活动',
+    content: text || 'Agent 子会话正在运行',
+    level: 'info',
+    display: 'silent',
+    raw: payload,
+  };
 }
 
 function isRuntimeFinalEvent(payload: unknown): boolean {
@@ -1964,6 +2597,22 @@ function buildAgentChildPrompt(cluster: AgentCluster, agent: ClusterAgent): stri
   const projectRoot = cluster.projectRoot?.trim() || cluster.sourceFolderPath?.trim() || null;
   const activeRun = (cluster.runs ?? []).find((run) => run.runId === cluster.activeRunId) ?? cluster.runs?.[0] ?? null;
   const activeChild = activeRun?.childRuns.find((child) => child.agentId === agent.agentId) ?? null;
+  const workflowNode = activeRun?.workflowSnapshot?.nodes.find((node) => workflowNodeIsAgent(node) && node.agentId === agent.agentId);
+  const upstreamWorkflowInputs = activeRun?.workflowSnapshot && workflowNode
+    ? activeRun.workflowSnapshot.edges
+      .filter((edge) => edge.toNodeId === workflowNode.nodeId)
+      .map((edge) => {
+        const sourceNode = activeRun.workflowSnapshot?.nodes.find((node) => node.nodeId === edge.fromNodeId);
+        const sourceRun = activeRun.nodeRuns?.find((nodeRun) => nodeRun.nodeId === edge.fromNodeId);
+        return {
+          nodeId: edge.fromNodeId,
+          name: sourceNode?.name,
+          kind: edge.kind,
+          status: sourceRun?.status,
+          output: sourceRun?.output,
+        };
+      })
+    : [];
   const runOutputRoot = activeRun?.outputRoot
     ?? activeChild?.outputRoot
     ?? null;
@@ -2078,6 +2727,27 @@ function buildAgentChildPrompt(cluster: AgentCluster, agent: ClusterAgent): stri
     'Cluster Manager 最新指令 / prompt patch：',
     promptPatches,
     '',
+    'Harness 节点契约：',
+    workflowNode
+      ? [
+          `- 节点类型：${workflowNode.type}`,
+          `- 节点名称：${workflowNode.name}`,
+          workflowNode.inputContract ? `- 输入契约：${safeStringify(workflowNode.inputContract)}` : '',
+          workflowNode.outputContract ? `- 输出契约：${safeStringify(workflowNode.outputContract)}` : '',
+          workflowNode.type === 'review'
+            ? '- 审查节点必须额外输出 [review:pass]、[review:revise] 或 [review:fail]。revise 表示退回目标节点重做，fail 表示暂停等待用户处理。'
+            : '',
+          workflowNode.type === 'reduce'
+            ? '- 综合节点必须只基于 Harness 提供的上游结构化结果进行汇总，不得跳过缺失输入。'
+            : '',
+        ].filter(Boolean).join('\n')
+      : '- 兼容旧 Agent 节点。',
+    '',
+    'Harness 上游结构化输入：',
+    upstreamWorkflowInputs.length > 0
+      ? compactText(safeStringify(upstreamWorkflowInputs), 5000)
+      : '无。',
+    '',
     '输出要求：先说明当前步骤，再给出可同步到 ClusterContext 的结论。不要泄露私有推理链。每条关键输出都带上 [agent:' + agent.agentId + '] 标记。',
     '',
     '完成协议（很重要）：当且仅当你的本阶段任务已经完成、下游可以继续时，请在输出末尾包含以下结构化标记：',
@@ -2088,19 +2758,40 @@ function buildAgentChildPrompt(cluster: AgentCluster, agent: ClusterAgent): stri
   ].join('\n');
 }
 
-function updateRootRunStatus(cluster: AgentCluster, run: AgentClusterRun, now: string): void {
+export function updateRootRunStatus(cluster: AgentCluster, run: AgentClusterRun, now: string): void {
   const childRuns = run.childRuns;
+  const nodeRuns = run.nodeRuns ?? [];
+  const hasWorkflowNodes = nodeRuns.length > 0;
+  const failedNode = nodeRuns.find((nodeRun) => nodeRun.status === 'failed');
+  const allWorkflowNodesComplete = hasWorkflowNodes
+    && nodeRuns.every((nodeRun) => workflowNodeSucceeded(nodeRun.status));
   run.submittedChildCount = childRuns.filter((child) => child.submitStatus === 'submitted' || child.runId).length;
   run.completedChildCount = childRuns.filter((child) => child.status === 'completed').length;
   run.failedChildCount = childRuns.filter((child) => child.status === 'error' || child.status === 'timeout').length;
   run.lastHeartbeatAt = now;
-  if (childRuns.some((child) => child.status === 'error' || child.status === 'timeout')) {
+  if (run.harnessStatus === 'waiting_human') {
+    run.status = 'blocked';
+    run.error = undefined;
+    run.completedAt = undefined;
+    cluster.activeRunId = run.runId;
+  } else if (run.harnessStatus === 'paused') {
+    run.status = 'blocked';
+    run.error = failedNode?.error;
+    run.completedAt = undefined;
+    cluster.activeRunId = run.runId;
+  } else if (failedNode || childRuns.some((child) => child.status === 'error' || child.status === 'timeout')) {
     run.status = 'error';
-    run.error = childRuns.find((child) => child.error)?.error ?? '子 Agent 运行失败';
+    run.harnessStatus = 'failed';
+    run.error = failedNode?.error ?? childRuns.find((child) => child.error)?.error ?? 'Harness 节点运行失败';
     run.completedAt = now;
     cluster.activeRunId = null;
-  } else if (childRuns.length > 0 && childRuns.every((child) => child.status === 'completed' || child.status === 'aborted')) {
-    run.status = childRuns.every((child) => child.status === 'completed') ? 'completed' : 'aborted';
+  } else if (
+    (hasWorkflowNodes && allWorkflowNodesComplete)
+    || (!hasWorkflowNodes && childRuns.length > 0 && childRuns.every((child) => child.status === 'completed' || child.status === 'aborted'))
+  ) {
+    const aborted = childRuns.some((child) => child.status === 'aborted');
+    run.status = aborted ? 'aborted' : 'completed';
+    run.harnessStatus = run.status === 'completed' ? 'completed' : 'aborted';
     run.completedAt = now;
     cluster.activeRunId = null;
     for (const agent of cluster.agents) {
@@ -2111,22 +2802,405 @@ function updateRootRunStatus(cluster: AgentCluster, run: AgentClusterRun, now: s
       }
     }
   } else if (new Date(run.timeoutAt ?? 0).getTime() < Date.now()) {
-    if (hasDispatchablePendingChild(cluster, run)) {
+    if (hasDispatchablePendingChild(cluster, run) || hasRecentlyActiveChildRun(run)) {
       run.status = 'running';
+      run.harnessStatus = 'running';
       run.error = undefined;
       run.completedAt = undefined;
-      run.timeoutAt = new Date(Date.now() + RUN_TIMEOUT_MS).toISOString();
+      extendRunTimeout(run, now, true);
       cluster.activeRunId = run.runId;
     } else {
       run.status = 'timeout';
+      run.harnessStatus = 'failed';
       run.error = '运行超时';
       run.completedAt = now;
       cluster.activeRunId = null;
     }
   } else {
     run.status = 'running';
+    if (run.harnessStatus !== 'paused' && run.harnessStatus !== 'waiting_human') {
+      run.harnessStatus = 'running';
+    }
   }
   run.updatedAt = now;
+}
+
+function extendRunTimeout(run: AgentClusterRun, now: string, force = false): boolean {
+  const currentMs = new Date(run.timeoutAt ?? 0).getTime();
+  const remainingMs = currentMs - Date.now();
+  if (!force && Number.isFinite(remainingMs) && remainingMs > RUN_TIMEOUT_MS - 60_000) return false;
+  run.timeoutAt = new Date(Date.now() + RUN_TIMEOUT_MS).toISOString();
+  run.lastHeartbeatAt = now;
+  return true;
+}
+
+function hasRecentlyActiveChildRun(run: AgentClusterRun): boolean {
+  return run.childRuns.some((child) => {
+    if (child.status === 'completed' || child.status === 'aborted' || child.status === 'error' || child.status === 'timeout') return false;
+    if (child.submitStatus !== 'submitted' && !child.runId) return false;
+    const activityMs = new Date(child.lastEventAt ?? child.updatedAt ?? child.startedAt).getTime();
+    return Number.isFinite(activityMs) && Date.now() - activityMs < RUN_TIMEOUT_MS;
+  });
+}
+
+function canRecoverTimedOutRunFromChild(cluster: AgentCluster, run: AgentClusterRun, child: AgentClusterChildRun): boolean {
+  if (cluster.activeRunId && cluster.activeRunId !== run.runId) return false;
+  if (run.status !== 'timeout' && run.status !== 'error') return false;
+  if (run.harnessStatus !== 'failed') return false;
+  if (child.status === 'completed' || child.status === 'aborted' || child.status === 'error') return false;
+  const settledMs = new Date(run.completedAt ?? run.updatedAt ?? run.startedAt).getTime();
+  return Number.isFinite(settledMs) && Date.now() - settledMs < RUN_TIMEOUT_RECOVERY_MS;
+}
+
+function recoverTimedOutRunForLateCompletion(cluster: AgentCluster, run: AgentClusterRun, now: string): void {
+  run.status = 'running';
+  run.harnessStatus = 'running';
+  run.error = undefined;
+  run.completedAt = undefined;
+  run.watchdogStatus = 'watching';
+  extendRunTimeout(run, now, true);
+  cluster.activeRunId = run.runId;
+}
+
+function workflowNodeRun(run: AgentClusterRun, nodeId: string): WorkflowNodeRun | undefined {
+  return run.nodeRuns?.find((nodeRun) => nodeRun.nodeId === nodeId);
+}
+
+function workflowControlPredecessors(workflow: AgentClusterWorkflow, nodeId: string): string[] {
+  return workflow.edges
+    .filter((edge) => edge.kind === 'control' && edge.toNodeId === nodeId)
+    .map((edge) => edge.fromNodeId);
+}
+
+function workflowControlSuccessors(workflow: AgentClusterWorkflow, nodeId: string): string[] {
+  return workflow.edges
+    .filter((edge) => edge.kind === 'control' && edge.fromNodeId === nodeId)
+    .map((edge) => edge.toNodeId);
+}
+
+function workflowAgentNodeIdsInLoop(loop: WorkflowLoopNode): Set<string> {
+  return new Set(loop.bodyNodeIds);
+}
+
+export function collectLoopDeterministicNodeIds(workflow: AgentClusterWorkflow, loop: WorkflowLoopNode): Set<string> {
+  const bodyNodeIds = workflowAgentNodeIdsInLoop(loop);
+  const deterministicNodeIds = new Set<string>();
+  const visit = (nodeId: string, seen: Set<string>) => {
+    if (seen.has(nodeId)) return;
+    seen.add(nodeId);
+    for (const nextNodeId of workflowControlSuccessors(workflow, nodeId)) {
+      const nextNode = workflow.nodes.find((node) => node.nodeId === nextNodeId);
+      if (!nextNode) continue;
+      if (workflowNodeIsAgent(nextNode)) {
+        if (bodyNodeIds.has(nextNodeId)) continue;
+        continue;
+      }
+      deterministicNodeIds.add(nextNodeId);
+      visit(nextNodeId, seen);
+    }
+  };
+  for (const bodyNodeId of bodyNodeIds) visit(bodyNodeId, new Set());
+  deterministicNodeIds.delete(loop.nodeId);
+  return deterministicNodeIds;
+}
+
+function workflowNodeSucceeded(status: WorkflowNodeRunStatus | undefined): boolean {
+  return status === 'completed' || status === 'skipped';
+}
+
+function syncAgentWorkflowNodeRun(
+  run: AgentClusterRun,
+  child: AgentClusterChildRun,
+  now: string,
+): void {
+  const nodeId = child.workflowNodeId;
+  if (!nodeId) return;
+  const nodeRun = workflowNodeRun(run, nodeId);
+  if (!nodeRun) return;
+  const status: WorkflowNodeRunStatus = child.status === 'completed'
+    ? 'completed'
+    : child.status === 'error' || child.status === 'timeout'
+      ? 'failed'
+      : child.status === 'aborted'
+        ? 'aborted'
+        : child.status === 'running' || child.status === 'starting'
+          ? 'running'
+          : child.status === 'blocked'
+            ? 'waiting'
+            : 'pending';
+  nodeRun.status = status;
+  nodeRun.updatedAt = now;
+  nodeRun.startedAt = nodeRun.startedAt ?? child.startedAt;
+  nodeRun.completedAt = child.completedAt;
+  nodeRun.error = child.error;
+  nodeRun.waitingReason = child.runtimeWaitReason;
+  nodeRun.output = {
+    ...(nodeRun.output ?? {}),
+    artifacts: child.artifacts ?? [],
+    completionSource: child.completionSource,
+    iteration: child.iteration,
+    count: child.actualCandidateCount,
+  };
+}
+
+function applyWorkflowFailurePolicy(
+  cluster: AgentCluster,
+  run: AgentClusterRun,
+  child: AgentClusterChildRun,
+  agent: ClusterAgent,
+  now: string,
+): void {
+  if (child.status !== 'error' && child.status !== 'timeout') return;
+  const node = run.workflowSnapshot?.nodes.find((item) => item.nodeId === child.workflowNodeId);
+  const nodeRun = child.workflowNodeId ? workflowNodeRun(run, child.workflowNodeId) : undefined;
+  const policy = node?.retryPolicy
+    ?? run.workflowSnapshot?.policy.defaultRetryPolicy
+    ?? defaultWorkflowPolicy().defaultRetryPolicy;
+  const attempts = nodeRun?.attempt ?? 1;
+  if (attempts < policy.maxAttempts) {
+    const error = child.error;
+    resetChildForRerun(cluster, run, child, agent, 'starting', now, child.iteration);
+    child.runtimeWaitReason = `自动重试 ${attempts + 1}/${policy.maxAttempts}`;
+    addClusterEvent(cluster, {
+      runId: run.runId,
+      agentId: agent.agentId,
+      title: 'Harness 自动重试',
+      content: `${agent.name} 第 ${attempts} 次执行失败，Harness 将按策略提交第 ${attempts + 1} 次尝试。${error ? ` 原因：${error}` : ''}`,
+      level: 'warning',
+      createdAt: now,
+    });
+    return;
+  }
+  if (policy.failureAction === 'skip') {
+    child.status = 'completed';
+    child.completionSource = 'manual';
+    child.completionSignal = 'workflow failure policy: skip';
+    child.completedAt = now;
+    child.error = undefined;
+    if (nodeRun) {
+      nodeRun.status = 'skipped';
+      nodeRun.completedAt = now;
+      nodeRun.error = undefined;
+    }
+    agent.status = 'done';
+    agent.localContext.status = 'done';
+    agent.currentTask = '失败策略已跳过该节点';
+    return;
+  }
+  if (policy.failureAction === 'pause' || policy.failureAction === 'retry') {
+    run.harnessStatus = 'paused';
+    run.status = 'blocked';
+    cluster.activeRunId = run.runId;
+  }
+}
+
+function mergeWorkflowTokenUsage(nodeRun: WorkflowNodeRun | undefined, message: Record<string, unknown>): void {
+  if (!nodeRun) return;
+  const usage = message.usage;
+  if (!usage || typeof usage !== 'object') return;
+  const record = usage as Record<string, unknown>;
+  const input = Number(record.input ?? record.inputTokens ?? record.prompt_tokens ?? 0);
+  const output = Number(record.output ?? record.outputTokens ?? record.completion_tokens ?? 0);
+  const total = Number(record.total ?? record.totalTokens ?? record.total_tokens ?? input + output);
+  if (![input, output, total].some((value) => Number.isFinite(value) && value > 0)) return;
+  nodeRun.tokenUsage = {
+    input: (nodeRun.tokenUsage?.input ?? 0) + (Number.isFinite(input) ? input : 0),
+    output: (nodeRun.tokenUsage?.output ?? 0) + (Number.isFinite(output) ? output : 0),
+    total: (nodeRun.tokenUsage?.total ?? 0) + (Number.isFinite(total) ? total : 0),
+  };
+}
+
+function valueMatchesWorkflowSchema(value: unknown, schema: Record<string, unknown>): boolean {
+  const type = schema.type;
+  if (type === 'object') {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const record = value as Record<string, unknown>;
+    const required = Array.isArray(schema.required) ? schema.required.map(String) : [];
+    if (required.some((key) => !(key in record))) return false;
+    const properties = schema.properties;
+    if (properties && typeof properties === 'object' && !Array.isArray(properties)) {
+      for (const [key, childSchema] of Object.entries(properties as Record<string, unknown>)) {
+        if (!(key in record) || !childSchema || typeof childSchema !== 'object' || Array.isArray(childSchema)) continue;
+        if (!valueMatchesWorkflowSchema(record[key], childSchema as Record<string, unknown>)) return false;
+      }
+    }
+    return true;
+  }
+  if (type === 'array') return Array.isArray(value);
+  if (type === 'string') return typeof value === 'string';
+  if (type === 'number' || type === 'integer') return typeof value === 'number' && Number.isFinite(value);
+  if (type === 'boolean') return typeof value === 'boolean';
+  return value !== undefined;
+}
+
+function gatePasses(node: WorkflowGateNode, workflow: AgentClusterWorkflow, run: AgentClusterRun): { passed: boolean; reason?: string } {
+  const predecessorIds = workflowControlPredecessors(workflow, node.nodeId);
+  const predecessorRuns = predecessorIds.map((nodeId) => workflowNodeRun(run, nodeId));
+  if (!predecessorRuns.every((nodeRun) => workflowNodeSucceeded(nodeRun?.status))) {
+    return { passed: false, reason: '等待上游节点完成' };
+  }
+  const requiredArtifacts = node.inputContract?.requiredArtifacts ?? node.outputContract?.requiredArtifacts ?? [];
+  if (node.gateKind === 'artifact' && requiredArtifacts.length > 0) {
+    const artifacts = predecessorRuns.flatMap((nodeRun) => {
+      const value = nodeRun?.output?.artifacts;
+      return Array.isArray(value) ? value.map(String) : [];
+    });
+    const missing = requiredArtifacts.filter((required) => !artifacts.some((artifact) => artifact.endsWith(required)));
+    if (missing.length > 0) return { passed: false, reason: `缺少产物：${missing.join('、')}` };
+  }
+  if (node.gateKind === 'count' && typeof node.minimumCount === 'number') {
+    const count = predecessorRuns.reduce((total, nodeRun) => total + Number(nodeRun?.output?.count ?? 0), 0);
+    if (count < node.minimumCount) return { passed: false, reason: `数量未达标：${count}/${node.minimumCount}` };
+  }
+  if (node.gateKind === 'schema') {
+    const schema = node.inputContract?.schema ?? node.outputContract?.schema;
+    if (!schema) return { passed: false, reason: 'Schema Gate 未配置 Schema' };
+    const invalid = predecessorRuns.find((nodeRun) => !valueMatchesWorkflowSchema(nodeRun?.output, schema));
+    if (invalid) return { passed: false, reason: `上游节点 ${invalid.nodeId} 输出不符合 Schema` };
+  }
+  return { passed: true };
+}
+
+function advanceDeterministicWorkflowNodes(cluster: AgentCluster, run: AgentClusterRun, now: string): boolean {
+  const workflow = run.workflowSnapshot;
+  if (!workflow || !run.nodeRuns) return false;
+  let changed = false;
+  let progressed = true;
+  while (progressed) {
+    progressed = false;
+    for (const node of workflow.nodes) {
+      if (workflowNodeIsAgent(node)) continue;
+      const nodeRun = workflowNodeRun(run, node.nodeId);
+      if (!nodeRun || workflowNodeSucceeded(nodeRun.status) || nodeRun.status === 'failed' || nodeRun.status === 'aborted') continue;
+      const predecessors = workflowControlPredecessors(workflow, node.nodeId);
+      const predecessorRuns = predecessors.map((nodeId) => workflowNodeRun(run, nodeId));
+      if (node.type === 'human_gate') {
+        if (predecessorRuns.every((item) => workflowNodeSucceeded(item?.status)) && nodeRun.status !== 'waiting_human') {
+          nodeRun.status = 'waiting_human';
+          nodeRun.waitingReason = node.prompt;
+          nodeRun.updatedAt = now;
+          run.harnessStatus = 'waiting_human';
+          addClusterEvent(cluster, {
+            runId: run.runId,
+            agentId: null,
+            title: '等待人工确认',
+            content: node.prompt,
+            level: 'warning',
+            createdAt: now,
+          });
+          changed = true;
+        }
+        continue;
+      }
+      if (node.type === 'loop') {
+        if (node.repeatCount <= 1 && predecessorRuns.every((item) => workflowNodeSucceeded(item?.status))) {
+          nodeRun.status = 'completed';
+          nodeRun.output = { repeatCount: node.repeatCount, bodyNodeIds: node.bodyNodeIds };
+          nodeRun.updatedAt = now;
+          nodeRun.completedAt = now;
+          changed = true;
+          progressed = true;
+        } else if (nodeRun.status === 'pending') {
+          nodeRun.status = 'waiting';
+          nodeRun.waitingReason = '等待循环主体完成';
+          nodeRun.updatedAt = now;
+          changed = true;
+        }
+        continue;
+      }
+      if (node.type === 'fan_out') {
+        if (predecessorRuns.every((item) => workflowNodeSucceeded(item?.status))) {
+          nodeRun.status = 'completed';
+          nodeRun.output = { concurrency: node.concurrency, branchNodeIds: workflowControlSuccessors(workflow, node.nodeId) };
+          nodeRun.updatedAt = now;
+          nodeRun.completedAt = now;
+          changed = true;
+          progressed = true;
+        }
+        continue;
+      }
+      if (node.type === 'join') {
+        const succeeded = predecessorRuns.filter((item) => workflowNodeSucceeded(item?.status)).length;
+        const failed = predecessorRuns.filter((item) => item?.status === 'failed' || item?.status === 'aborted').length;
+        const required = node.mode === 'minimum' ? Math.max(1, node.minimumSuccess ?? 1) : predecessorRuns.length;
+        if (succeeded >= required) {
+          nodeRun.status = 'completed';
+          nodeRun.output = { succeeded, failed, required, sourceNodeIds: predecessors };
+          nodeRun.updatedAt = now;
+          nodeRun.completedAt = now;
+          changed = true;
+          progressed = true;
+        } else if (failed > predecessorRuns.length - required) {
+          nodeRun.status = 'failed';
+          nodeRun.error = `Join 无法达到成功条件：${succeeded}/${required}`;
+          nodeRun.updatedAt = now;
+          run.harnessStatus = 'paused';
+          changed = true;
+        }
+        continue;
+      }
+      if (node.type === 'gate') {
+        const result = gatePasses(node, workflow, run);
+        if (result.passed) {
+          nodeRun.status = 'completed';
+          nodeRun.output = { passed: true };
+          nodeRun.updatedAt = now;
+          nodeRun.completedAt = now;
+          changed = true;
+          progressed = true;
+        } else {
+          nodeRun.status = 'waiting';
+          nodeRun.waitingReason = result.reason;
+          nodeRun.updatedAt = now;
+        }
+      }
+    }
+  }
+  return changed;
+}
+
+function isWorkflowAgentNodeReady(run: AgentClusterRun, workflowNodeId: string): boolean {
+  const workflow = run.workflowSnapshot;
+  if (!workflow) return true;
+  return workflowControlPredecessors(workflow, workflowNodeId)
+    .every((nodeId) => workflowNodeSucceeded(workflowNodeRun(run, nodeId)?.status));
+}
+
+function hasWorkflowFanOutCapacity(run: AgentClusterRun, workflowNodeId: string): boolean {
+  const workflow = run.workflowSnapshot;
+  if (!workflow) return true;
+  const fanOutNodes = workflowControlPredecessors(workflow, workflowNodeId)
+    .map((nodeId) => workflow.nodes.find((node) => node.nodeId === nodeId))
+    .filter((node): node is WorkflowFanOutNode => node?.type === 'fan_out');
+  return fanOutNodes.every((fanOut) => {
+    const branchNodeIds = new Set(workflowControlSuccessors(workflow, fanOut.nodeId));
+    const runningBranches = (run.nodeRuns ?? []).filter((nodeRun) =>
+      branchNodeIds.has(nodeRun.nodeId)
+      && (nodeRun.status === 'running' || nodeRun.status === 'recovering')
+    ).length;
+    return runningBranches < fanOut.concurrency;
+  });
+}
+
+function updateWorkflowCheckpoint(run: AgentClusterRun, now: string): void {
+  if (!run.workflowSnapshot || !run.nodeRuns) return;
+  run.checkpoint = {
+    checkpointId: `checkpoint-${randomUUID()}`,
+    runId: run.runId,
+    workflowId: run.workflowSnapshot.workflowId,
+    workflowVersion: run.workflowSnapshot.version,
+    status: run.harnessStatus === 'paused' || run.harnessStatus === 'waiting_human'
+      ? 'paused'
+      : run.harnessStatus === 'completed'
+        ? 'completed'
+        : run.harnessStatus === 'failed'
+          ? 'failed'
+          : run.harnessStatus === 'aborted'
+            ? 'aborted'
+            : 'running',
+    nodeRuns: structuredClone(run.nodeRuns),
+    createdAt: now,
+  };
 }
 
 function addClusterEvent(
@@ -2143,6 +3217,37 @@ function addClusterEvent(
   return event;
 }
 
+function shouldAppendRuntimeEvent(
+  cluster: AgentCluster,
+  input: Omit<AgentClusterEvent, 'eventId' | 'clusterId' | 'createdAt'>,
+  createdAt: string,
+): boolean {
+  if (input.display === 'silent') return false;
+  const duplicateWindowMs = input.title === '子会话活动' ? 60_000 : 8_000;
+  const currentMs = new Date(createdAt).getTime();
+  const duplicate = (cluster.events ?? []).find((event) =>
+    event.runId === input.runId
+    && event.agentId === input.agentId
+    && event.title === input.title
+    && event.content === input.content
+  );
+  if (!duplicate) return true;
+  const duplicateMs = new Date(duplicate.createdAt).getTime();
+  return !Number.isFinite(currentMs)
+    || !Number.isFinite(duplicateMs)
+    || currentMs - duplicateMs > duplicateWindowMs;
+}
+
+function appendRuntimeEventIfVisible(
+  cluster: AgentCluster,
+  input: Omit<AgentClusterEvent, 'eventId' | 'clusterId' | 'createdAt'>,
+  createdAt: string,
+): boolean {
+  if (!shouldAppendRuntimeEvent(cluster, input, createdAt)) return false;
+  addClusterEvent(cluster, { ...input, createdAt });
+  return true;
+}
+
 function findRun(cluster: AgentCluster, runId: string): AgentClusterRun {
   const run = (cluster.runs ?? []).find((item) => item.runId === runId);
   if (!run) throw new Error('Agent Cluster run not found');
@@ -2153,6 +3258,9 @@ function hasDispatchablePendingChild(cluster: AgentCluster, run: AgentClusterRun
   return run.childRuns.some((child) => {
     if (child.status === 'completed' || child.status === 'error' || child.status === 'timeout' || child.status === 'aborted') return false;
     if (child.submitStatus === 'submitted' && child.runId) return false;
+    if (child.workflowNodeId && run.workflowSnapshot) {
+      return isWorkflowAgentNodeReady(run, child.workflowNodeId);
+    }
     const upstreamIds = getBlockingUpstreamAgentIds(cluster, child.agentId);
     return upstreamIds.every((agentId) => {
       const upstreamChild = run.childRuns.find((item) => item.agentId === agentId);
@@ -2161,7 +3269,108 @@ function hasDispatchablePendingChild(cluster: AgentCluster, run: AgentClusterRun
   });
 }
 
+export function countSubmittedActiveChildRuns(run: Pick<AgentClusterRun, 'childRuns'>): number {
+  return run.childRuns.filter((child) =>
+    (child.status === 'running' || child.status === 'starting')
+    && (child.submitStatus === 'submitted' || Boolean(child.runId))
+  ).length;
+}
+
+export function summarizeRuntimeSessionFailure(entry: Record<string, unknown>): string | null {
+  const status = String(entry.status ?? '').toLowerCase();
+  if (status !== 'failed' && status !== 'error') return null;
+  const explicitError = [entry.error, entry.errorMessage, entry.message]
+    .find((value) => typeof value === 'string' && value.trim());
+  if (typeof explicitError === 'string') return compactText(explicitError, 600);
+
+  const runtimeMs = Number(entry.runtimeMs);
+  const duration = Number.isFinite(runtimeMs) && runtimeMs > 0
+    ? `，运行约 ${Math.max(1, Math.round(runtimeMs / 1000))} 秒`
+    : '';
+  return `OpenClaw 子会话状态为 ${status}${duration}，但 transcript 未提供可读错误正文。`;
+}
+
+function resolveSessionFileFromEntry(entry: Record<string, unknown>, sessionsDir: string): string | null {
+  const rawFile = [entry.sessionFile, entry.file, entry.fileName, entry.path]
+    .find((value) => typeof value === 'string' && value.trim());
+  if (typeof rawFile === 'string') {
+    if (isAbsolute(rawFile)) return rawFile;
+    return join(sessionsDir, rawFile.endsWith('.jsonl') ? rawFile : `${rawFile}.jsonl`);
+  }
+
+  const rawId = [entry.sessionId, entry.id]
+    .find((value) => typeof value === 'string' && value.trim());
+  if (typeof rawId === 'string') {
+    return join(sessionsDir, rawId.endsWith('.jsonl') ? rawId : `${rawId}.jsonl`);
+  }
+
+  return null;
+}
+
+async function readRuntimeSessionStoreEntry(sessionKey: string): Promise<Record<string, unknown> | null> {
+  const parts = sessionKey.split(':');
+  const agentId = parts[1];
+  if (!agentId) return null;
+  const sessionsDir = join(getOpenClawConfigDir(), 'agents', agentId, 'sessions');
+  const sessionsJsonPath = join(sessionsDir, 'sessions.json');
+  const raw = await readFile(sessionsJsonPath, 'utf8').catch(() => '');
+  if (!raw.trim()) return null;
+
+  try {
+    const store = JSON.parse(raw) as Record<string, unknown>;
+    const directEntry = store[sessionKey];
+    if (directEntry && typeof directEntry === 'object' && !Array.isArray(directEntry)) {
+      const entry = { ...(directEntry as Record<string, unknown>) };
+      entry.sessionFile = entry.sessionFile ?? resolveSessionFileFromEntry(entry, sessionsDir);
+      return entry;
+    }
+
+    const sessions = store.sessions;
+    if (Array.isArray(sessions)) {
+      const arrayEntry = sessions.find((entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+        const record = entry as Record<string, unknown>;
+        return record.key === sessionKey || record.sessionKey === sessionKey;
+      });
+      if (arrayEntry && typeof arrayEntry === 'object' && !Array.isArray(arrayEntry)) {
+        const entry = { ...(arrayEntry as Record<string, unknown>) };
+        entry.sessionFile = entry.sessionFile ?? resolveSessionFileFromEntry(entry, sessionsDir);
+        return entry;
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
 function getBlockingUpstreamAgentIds(cluster: AgentCluster, agentId: string): string[] {
+  const workflow = getCurrentWorkflow(cluster);
+  const targetNode = workflow.nodes.find((node) => workflowNodeIsAgent(node) && node.agentId === agentId);
+  if (targetNode) {
+    const incoming = new Map<string, string[]>();
+    for (const edge of workflow.edges.filter((item) => item.kind === 'control')) {
+      incoming.set(edge.toNodeId, [...(incoming.get(edge.toNodeId) ?? []), edge.fromNodeId]);
+    }
+    const result = new Set<string>();
+    const seen = new Set<string>();
+    const visit = (nodeId: string) => {
+      if (seen.has(nodeId)) return;
+      seen.add(nodeId);
+      for (const upstreamNodeId of incoming.get(nodeId) ?? []) {
+        const upstreamNode = workflow.nodes.find((node) => node.nodeId === upstreamNodeId);
+        if (!upstreamNode) continue;
+        if (workflowNodeIsAgent(upstreamNode)) {
+          result.add(upstreamNode.agentId);
+        } else {
+          visit(upstreamNodeId);
+        }
+      }
+    };
+    visit(targetNode.nodeId);
+    return [...result];
+  }
   const graph = normalizeExecutionGraph(cluster);
   return graph.edges
     .filter((edge) => edge.toAgentId === agentId && isBlockingExecutionEdge(edge))
@@ -2169,6 +3378,31 @@ function getBlockingUpstreamAgentIds(cluster: AgentCluster, agentId: string): st
 }
 
 function getBlockingDownstreamAgentIds(cluster: AgentCluster, agentId: string): string[] {
+  const workflow = getCurrentWorkflow(cluster);
+  const sourceNode = workflow.nodes.find((node) => workflowNodeIsAgent(node) && node.agentId === agentId);
+  if (sourceNode) {
+    const outgoing = new Map<string, string[]>();
+    for (const edge of workflow.edges.filter((item) => item.kind === 'control')) {
+      outgoing.set(edge.fromNodeId, [...(outgoing.get(edge.fromNodeId) ?? []), edge.toNodeId]);
+    }
+    const result = new Set<string>();
+    const seen = new Set<string>();
+    const visit = (nodeId: string) => {
+      if (seen.has(nodeId)) return;
+      seen.add(nodeId);
+      for (const downstreamNodeId of outgoing.get(nodeId) ?? []) {
+        const downstreamNode = workflow.nodes.find((node) => node.nodeId === downstreamNodeId);
+        if (!downstreamNode) continue;
+        if (workflowNodeIsAgent(downstreamNode)) {
+          result.add(downstreamNode.agentId);
+        } else {
+          visit(downstreamNodeId);
+        }
+      }
+    };
+    visit(sourceNode.nodeId);
+    return [...result];
+  }
   const graph = normalizeExecutionGraph(cluster);
   return graph.edges
     .filter((edge) => edge.fromAgentId === agentId && isBlockingExecutionEdge(edge))
@@ -2269,6 +3503,17 @@ function resetChildForRerun(
   child.iteration = iteration;
   child.startedAt = now;
   child.updatedAt = now;
+  if (child.workflowNodeId) {
+    const nodeRun = workflowNodeRun(run, child.workflowNodeId);
+    if (nodeRun) {
+      nodeRun.status = status === 'starting' ? 'ready' : 'waiting';
+      nodeRun.error = undefined;
+      nodeRun.output = undefined;
+      nodeRun.completedAt = undefined;
+      nodeRun.waitingReason = status === 'starting' ? undefined : '等待上游重新完成';
+      nodeRun.updatedAt = now;
+    }
+  }
   if (agent) {
     agent.status = status === 'starting' ? 'running' : 'waiting';
     agent.localContext.status = agent.status;
@@ -2280,26 +3525,53 @@ function resetChildForRerun(
   }
 }
 
+function resetWorkflowNodeForLoopIteration(run: AgentClusterRun, nodeId: string, now: string): void {
+  const nodeRun = workflowNodeRun(run, nodeId);
+  if (!nodeRun) return;
+  nodeRun.status = 'pending';
+  nodeRun.output = undefined;
+  nodeRun.error = undefined;
+  nodeRun.completedAt = undefined;
+  nodeRun.waitingReason = '等待循环本轮上游完成';
+  nodeRun.updatedAt = now;
+}
+
 function maybeAdvanceExecutionLoops(
   cluster: AgentCluster,
   run: AgentClusterRun,
   completedAgentId: string,
   now: string,
 ): void {
-  const graph = normalizeExecutionGraph(cluster);
-  for (const loop of graph.loops ?? []) {
-    if (loop.endAgentId !== completedAgentId || loop.repeatCount <= 1) continue;
-    const path = getBlockingPathAgentIds(cluster, loop.startAgentId, loop.endAgentId);
-    if (path.length === 0) continue;
+  const workflow = run.workflowSnapshot ?? getCurrentWorkflow(cluster);
+  for (const loop of workflow.nodes.filter((node): node is WorkflowLoopNode => node.type === 'loop')) {
+    if (loop.repeatCount <= 1) continue;
+    const path = loop.bodyNodeIds
+      .map((nodeId) => workflow.nodes.find((node) => node.nodeId === nodeId))
+      .filter((node): node is WorkflowAgentNode => Boolean(node) && workflowNodeIsAgent(node))
+      .map((node) => node.agentId);
+    if (path.length === 0 || path[path.length - 1] !== completedAgentId) continue;
     const pathChildren = path
       .map((agentId) => run.childRuns.find((child) => child.agentId === agentId))
       .filter((child): child is AgentClusterChildRun => Boolean(child));
     if (pathChildren.length !== path.length || !pathChildren.every((child) => child.status === 'completed')) continue;
 
-    const state = getLoopState(run, loop, now);
+    const legacyLoop: AgentClusterExecutionLoop = {
+      loopId: loop.nodeId,
+      startAgentId: path[0],
+      endAgentId: path[path.length - 1],
+      repeatCount: loop.repeatCount,
+    };
+    const state = getLoopState(run, legacyLoop, now);
     if (state.currentIteration >= loop.repeatCount) {
       state.status = 'completed';
       state.updatedAt = now;
+      const loopNodeRun = workflowNodeRun(run, loop.nodeId);
+      if (loopNodeRun) {
+        loopNodeRun.status = 'completed';
+        loopNodeRun.output = { repeatCount: loop.repeatCount, bodyNodeIds: loop.bodyNodeIds };
+        loopNodeRun.updatedAt = now;
+        loopNodeRun.completedAt = now;
+      }
       continue;
     }
 
@@ -2307,6 +3579,17 @@ function maybeAdvanceExecutionLoops(
     state.currentIteration = nextIteration;
     state.status = 'running';
     state.updatedAt = now;
+    const loopNodeRun = workflowNodeRun(run, loop.nodeId);
+    if (loopNodeRun) {
+      loopNodeRun.status = 'waiting';
+      loopNodeRun.completedAt = undefined;
+      loopNodeRun.output = undefined;
+      loopNodeRun.waitingReason = '等待循环主体完成';
+      loopNodeRun.updatedAt = now;
+    }
+    for (const deterministicNodeId of collectLoopDeterministicNodeIds(workflow, loop)) {
+      resetWorkflowNodeForLoopIteration(run, deterministicNodeId, now);
+    }
 
     path.forEach((agentId, index) => {
       const child = run.childRuns.find((item) => item.agentId === agentId);
@@ -2993,6 +4276,89 @@ export async function deleteAgentCluster(clusterId: string): Promise<void> {
   });
 }
 
+export async function createAgentClusterAgent(
+  clusterId: string,
+  input: CreateAgentClusterAgentInput,
+): Promise<AgentCluster> {
+  return withStoreQueue(async () => {
+    const clusters = await readClusters();
+    const index = clusters.findIndex((cluster) => cluster.clusterId === clusterId);
+    if (index === -1) throw new Error('Agent Cluster not found');
+    const cluster = clusters[index];
+    if (cluster.activeRunId) throw new Error('运行中不能新增 Agent');
+
+    const name = input.name?.trim();
+    const role = input.role?.trim();
+    if (!name) throw new Error('Agent name is required');
+    if (!role) throw new Error('Agent role is required');
+
+    const now = new Date().toISOString();
+    const responsibilities = coerceStringArray(input.responsibilities);
+    const description = input.description?.trim() || role;
+    const agent = buildAgent(cluster.clusterId, {
+      name: compactText(name, 80),
+      role: compactText(role, 80),
+      description: compactText(description, 260),
+      responsibilities: responsibilities.length > 0 ? responsibilities : [description],
+      tools: coerceStringArray(input.tools),
+      capabilities: coerceStringArray(input.capabilities),
+    }, cluster.agents.length, cluster.sharedContext.globalGoal || cluster.sourceContent || description);
+    const systemPrompt = input.systemPrompt?.trim();
+    if (systemPrompt) {
+      agent.systemPrompt = systemPrompt;
+      agent.localContext.systemPrompt = systemPrompt;
+    }
+
+    cluster.agents = [...cluster.agents, agent];
+    cluster.sharedContext.agentSummaries = [
+      ...(cluster.sharedContext.agentSummaries ?? []),
+      {
+        agentId: agent.agentId,
+        name: agent.name,
+        summary: `手动新增：${agent.role}。${agent.description}`,
+        updatedAt: now,
+      },
+    ].slice(-50);
+
+    const graph = sanitizeExecutionGraph(cluster, {
+      ...(cluster.executionGraph ?? buildExecutionGraph(cluster.agents, cluster.edges, false, now)),
+      confirmed: false,
+      updatedAt: now,
+    });
+    cluster.executionGraph = graph;
+    cluster.edges = graph.edges;
+
+    const nextVersion = Math.max(0, ...(cluster.workflows ?? []).map((workflow) => workflow.version)) + 1;
+    const workflow = buildWorkflowFromExecutionGraph(cluster.clusterId, cluster.agents, graph, 'user', nextVersion, now);
+    cluster.workflows = [
+      workflow,
+      ...(cluster.workflows ?? []).map((item) => item.status === 'confirmed' ? { ...item, status: 'archived' as const } : item),
+    ];
+    cluster.currentWorkflowId = workflow.workflowId;
+    cluster.orchestrationConfirmedAt = null;
+    cluster.messages.push(makeMessage(clusterId, {
+      senderType: 'orchestrator',
+      senderAgentId: null,
+      targetType: 'cluster',
+      targetAgentId: null,
+      messageType: 'update',
+      content: `已新增子 Agent「${agent.name}」。请在 Workflow 画布中连接它，并重新确认流水线。`,
+      visibility: 'public',
+    }, now));
+    addClusterEvent(cluster, {
+      agentId: agent.agentId,
+      title: '子 Agent 已新增',
+      content: `${agent.name} 已加入集群；当前 Workflow 已变为草稿。`,
+      level: 'info',
+      createdAt: now,
+    });
+    cluster.updatedAt = now;
+    clusters[index] = cluster;
+    await writeClusters(clusters);
+    return cluster;
+  });
+}
+
 export async function updateAgentClusterExecutionGraph(
   clusterId: string,
   graphPatch: Partial<AgentClusterExecutionGraph>,
@@ -3003,8 +4369,15 @@ export async function updateAgentClusterExecutionGraph(
     if (index === -1) throw new Error('Agent Cluster not found');
     const cluster = clusters[index];
     const graph = sanitizeExecutionGraph(cluster, { ...graphPatch, confirmed: false });
+    const nextVersion = Math.max(0, ...(cluster.workflows ?? []).map((workflow) => workflow.version)) + 1;
+    const workflow = buildWorkflowFromExecutionGraph(cluster.clusterId, cluster.agents, graph, 'user', nextVersion, graph.updatedAt);
     cluster.executionGraph = graph;
     cluster.edges = graph.edges;
+    cluster.workflows = [
+      workflow,
+      ...(cluster.workflows ?? []).map((item) => item.status === 'confirmed' ? { ...item, status: 'archived' as const } : item),
+    ];
+    cluster.currentWorkflowId = workflow.workflowId;
     cluster.orchestrationConfirmedAt = null;
     cluster.updatedAt = graph.updatedAt;
     clusters[index] = cluster;
@@ -3027,8 +4400,22 @@ export async function confirmAgentClusterExecutionGraph(clusterId: string): Prom
     graph.confirmed = true;
     graph.updatedAt = now;
     assertBlockingDag(cluster, graph);
+    const currentWorkflow = normalizeWorkflow(cluster, getCurrentWorkflow(cluster));
+    assertWorkflowValid(cluster, currentWorkflow);
+    currentWorkflow.status = 'confirmed';
+    currentWorkflow.confirmedAt = now;
+    currentWorkflow.updatedAt = now;
     cluster.executionGraph = graph;
     cluster.edges = graph.edges;
+    cluster.workflows = (cluster.workflows ?? []).map((workflow) => workflow.workflowId === currentWorkflow.workflowId
+      ? currentWorkflow
+      : workflow.status === 'confirmed'
+        ? { ...workflow, status: 'archived' as const }
+        : workflow);
+    if (!(cluster.workflows ?? []).some((workflow) => workflow.workflowId === currentWorkflow.workflowId)) {
+      cluster.workflows = [currentWorkflow, ...(cluster.workflows ?? [])];
+    }
+    cluster.currentWorkflowId = currentWorkflow.workflowId;
     cluster.orchestrationConfirmedAt = now;
     cluster.updatedAt = now;
     addClusterEvent(cluster, {
@@ -3038,6 +4425,118 @@ export async function confirmAgentClusterExecutionGraph(clusterId: string): Prom
       level: 'success',
       createdAt: now,
     });
+    clusters[index] = cluster;
+    await writeClusters(clusters);
+    return cluster;
+  });
+}
+
+export async function updateAgentClusterWorkflow(
+  clusterId: string,
+  workflowPatch: Partial<AgentClusterWorkflow>,
+): Promise<AgentCluster> {
+  return withStoreQueue(async () => {
+    const clusters = await readClusters();
+    const index = clusters.findIndex((cluster) => cluster.clusterId === clusterId);
+    if (index === -1) throw new Error('Agent Cluster not found');
+    const cluster = clusters[index];
+    if (cluster.activeRunId) throw new Error('运行中不能修改 Workflow');
+    const now = new Date().toISOString();
+    const current = getCurrentWorkflow(cluster);
+    const nextVersion = Math.max(0, ...(cluster.workflows ?? []).map((workflow) => workflow.version)) + 1;
+    const draft = normalizeWorkflow(cluster, {
+      ...current,
+      ...workflowPatch,
+      workflowId: `workflow-${randomUUID()}`,
+      version: nextVersion,
+      status: 'draft',
+      createdBy: 'user',
+      createdAt: now,
+      updatedAt: now,
+      confirmedAt: undefined,
+      nodes: Array.isArray(workflowPatch.nodes) ? workflowPatch.nodes : current.nodes,
+      edges: Array.isArray(workflowPatch.edges) ? workflowPatch.edges : current.edges,
+      policy: workflowPatch.policy ? { ...current.policy, ...workflowPatch.policy } : current.policy,
+    });
+    assertWorkflowValid(cluster, draft);
+    cluster.workflows = [draft, ...(cluster.workflows ?? [])];
+    cluster.currentWorkflowId = draft.workflowId;
+    cluster.orchestrationConfirmedAt = null;
+    cluster.updatedAt = now;
+    addClusterEvent(cluster, {
+      agentId: null,
+      title: 'Workflow 草稿已保存',
+      content: `已创建 Workflow v${draft.version}，确认后才会用于运行。`,
+      level: 'info',
+      createdAt: now,
+    });
+    clusters[index] = cluster;
+    await writeClusters(clusters);
+    return cluster;
+  });
+}
+
+export async function confirmAgentClusterWorkflow(clusterId: string, workflowId?: string): Promise<AgentCluster> {
+  return withStoreQueue(async () => {
+    const clusters = await readClusters();
+    const index = clusters.findIndex((cluster) => cluster.clusterId === clusterId);
+    if (index === -1) throw new Error('Agent Cluster not found');
+    const cluster = clusters[index];
+    if (cluster.activeRunId) throw new Error('运行中不能确认新的 Workflow');
+    const now = new Date().toISOString();
+    const target = (cluster.workflows ?? []).find((workflow) => workflow.workflowId === (workflowId ?? cluster.currentWorkflowId));
+    if (!target) throw new Error('Workflow not found');
+    const confirmed = normalizeWorkflow(cluster, target);
+    assertWorkflowValid(cluster, confirmed);
+    confirmed.status = 'confirmed';
+    confirmed.confirmedAt = now;
+    confirmed.updatedAt = now;
+    cluster.workflows = (cluster.workflows ?? []).map((workflow) => workflow.workflowId === confirmed.workflowId
+      ? confirmed
+      : workflow.status === 'confirmed'
+        ? { ...workflow, status: 'archived' as const }
+        : workflow);
+    cluster.currentWorkflowId = confirmed.workflowId;
+    cluster.orchestrationConfirmedAt = now;
+    cluster.updatedAt = now;
+    addClusterEvent(cluster, {
+      agentId: null,
+      title: 'Workflow 已确认',
+      content: `Workflow v${confirmed.version} 已锁定；后续运行会保存不可变快照。`,
+      level: 'success',
+      createdAt: now,
+    });
+    clusters[index] = cluster;
+    await writeClusters(clusters);
+    return cluster;
+  });
+}
+
+export async function rollbackAgentClusterWorkflow(clusterId: string, workflowId: string): Promise<AgentCluster> {
+  return withStoreQueue(async () => {
+    const clusters = await readClusters();
+    const index = clusters.findIndex((cluster) => cluster.clusterId === clusterId);
+    if (index === -1) throw new Error('Agent Cluster not found');
+    const cluster = clusters[index];
+    if (cluster.activeRunId) throw new Error('运行中不能回退 Workflow');
+    const source = (cluster.workflows ?? []).find((workflow) => workflow.workflowId === workflowId);
+    if (!source) throw new Error('Workflow not found');
+    const now = new Date().toISOString();
+    const version = Math.max(0, ...(cluster.workflows ?? []).map((workflow) => workflow.version)) + 1;
+    const draft = normalizeWorkflow(cluster, {
+      ...structuredClone(source),
+      workflowId: `workflow-${randomUUID()}`,
+      version,
+      status: 'draft',
+      createdBy: 'user',
+      createdAt: now,
+      updatedAt: now,
+      confirmedAt: undefined,
+    });
+    cluster.workflows = [draft, ...(cluster.workflows ?? [])];
+    cluster.currentWorkflowId = draft.workflowId;
+    cluster.orchestrationConfirmedAt = null;
+    cluster.updatedAt = now;
     clusters[index] = cluster;
     await writeClusters(clusters);
     return cluster;
@@ -3057,11 +4556,17 @@ async function submitReadyAgentClusterChildren(
     const cluster = clusters[index];
     const run = (cluster.runs ?? []).find((item) => item.runId === runId);
     if (!run || cluster.activeRunId !== runId || run.status !== 'running') return [];
+    if (run.harnessStatus === 'paused' || run.harnessStatus === 'waiting_human') return [];
     const now = new Date().toISOString();
-    await reconcileRunArtifacts(cluster, run, now);
+    let changed = await reconcileRunArtifacts(cluster, run, now);
+    if (advanceDeterministicWorkflowNodes(cluster, run, now)) changed = true;
     const readyJobs: Array<{ agent: ClusterAgent; child: AgentClusterChildRun; message: string }> = [];
+    const maxConcurrency = run.workflowSnapshot?.policy.maxConcurrency ?? DEFAULT_WORKFLOW_CONCURRENCY;
+    const activeCount = countSubmittedActiveChildRuns(run);
+    let availableSlots = Math.max(0, maxConcurrency - activeCount);
 
     for (const child of run.childRuns) {
+      if (availableSlots <= 0) break;
       const agent = cluster.agents.find((item) => item.agentId === child.agentId);
       if (!agent) continue;
       if (child.status === 'completed' || child.status === 'error' || child.status === 'timeout' || child.status === 'aborted') continue;
@@ -3081,37 +4586,55 @@ async function submitReadyAgentClusterChildren(
       }
 
       const upstreamIds = getBlockingUpstreamAgentIds(cluster, child.agentId);
-      const blockingUpstream = upstreamIds.filter((agentId) => {
+      const harnessReady = child.workflowNodeId
+        ? isWorkflowAgentNodeReady(run, child.workflowNodeId)
+        : upstreamIds.every((agentId) => run.childRuns.find((item) => item.agentId === agentId)?.status === 'completed');
+      const fanOutReady = child.workflowNodeId ? hasWorkflowFanOutCapacity(run, child.workflowNodeId) : true;
+      const blockingUpstream = harnessReady ? [] : upstreamIds.filter((agentId) => {
         const upstreamChild = run.childRuns.find((item) => item.agentId === agentId);
         return !upstreamChild || upstreamChild.status !== 'completed';
       });
 
-      if (blockingUpstream.length > 0) {
-        child.status = 'blocked';
-        child.submitStatus = child.submitStatus ?? 'pending';
-        child.updatedAt = now;
-        agent.status = 'waiting';
-        agent.localContext.status = 'waiting';
-        agent.currentTask = `等待上游完成：${blockingUpstream
+      if (!harnessReady || !fanOutReady) {
+        const nextTask = !fanOutReady
+          ? '等待 Fan-out 并发槽位'
+          : blockingUpstream.length > 0 ? `等待上游完成：${blockingUpstream
           .map((agentId) => cluster.agents.find((item) => item.agentId === agentId)?.name ?? agentId)
-          .join('、')}`;
-        agent.runtimeStatusReason = 'DAG 阻塞';
-        agent.lastActivityAt = now;
-        addClusterEvent(cluster, {
-          runId,
-          agentId: agent.agentId,
-          title: '等待上游 Agent',
-          content: agent.currentTask,
-          level: 'info',
-          createdAt: now,
-        });
+          .join('、')}` : '等待 Harness 算子完成';
+        const nextReason = 'Harness 阻塞';
+        const stateChanged = child.status !== 'blocked'
+          || child.submitStatus !== 'pending'
+          || agent.status !== 'waiting'
+          || agent.currentTask !== nextTask
+          || agent.runtimeStatusReason !== nextReason;
+        if (stateChanged) {
+          child.status = 'blocked';
+          child.submitStatus = 'pending';
+          child.updatedAt = now;
+          agent.status = 'waiting';
+          agent.localContext.status = 'waiting';
+          agent.currentTask = nextTask;
+          agent.runtimeStatusReason = nextReason;
+          agent.lastActivityAt = now;
+          addClusterEvent(cluster, {
+            runId,
+            agentId: agent.agentId,
+            title: '等待上游 Agent',
+            content: agent.currentTask,
+            level: 'info',
+            createdAt: now,
+          });
+          changed = true;
+        }
         continue;
       }
 
+      changed = true;
       child.status = 'starting';
       child.submitStatus = 'submitted';
       child.updatedAt = now;
       child.lastEventAt = now;
+      extendRunTimeout(run, now, true);
       agent.status = 'running';
       agent.localContext.status = 'running';
       agent.currentTask = 'DAG 条件满足，正在提交子会话';
@@ -3119,6 +4642,16 @@ async function submitReadyAgentClusterChildren(
       agent.lastActivityAt = now;
       agent.runtimeSessionKey = child.sessionKey;
       agent.runtimeRunId = child.runId;
+      if (child.workflowNodeId) {
+        const nodeRun = workflowNodeRun(run, child.workflowNodeId);
+        if (nodeRun) {
+          nodeRun.status = 'running';
+          nodeRun.attempt += 1;
+          nodeRun.startedAt = now;
+          nodeRun.updatedAt = now;
+          nodeRun.waitingReason = undefined;
+        }
+      }
       addClusterEvent(cluster, {
         runId,
         agentId: agent.agentId,
@@ -3132,13 +4665,17 @@ async function submitReadyAgentClusterChildren(
         child: { ...child },
         message: buildAgentChildPrompt(cluster, agent),
       });
+      availableSlots -= 1;
     }
 
     updateRootRunStatus(cluster, run, now);
-    cluster.updatedAt = now;
-    clusters[index] = cluster;
-    await writeClusters(clusters);
-    eventBus?.emit('agent-cluster:updated', { cluster });
+    if (changed) {
+      updateWorkflowCheckpoint(run, now);
+      cluster.updatedAt = now;
+      clusters[index] = cluster;
+      await writeClusters(clusters);
+      eventBus?.emit('agent-cluster:updated', { cluster });
+    }
     return readyJobs;
   });
 
@@ -3188,11 +4725,11 @@ export async function startAgentClusterRun(
     if (index === -1) throw new Error('Agent Cluster not found');
     const cluster = clusters[index];
     if (cluster.activeRunId) return cluster;
-    const executionGraph = normalizeExecutionGraph(cluster);
-    if (!executionGraph.confirmed) {
-      throw new Error('请先确认 Agent 编排图，再启动集群运行');
+    const workflow = normalizeWorkflow(cluster, getCurrentWorkflow(cluster));
+    if (workflow.status !== 'confirmed') {
+      throw new Error('请先确认 Harness Workflow，再启动集群运行');
     }
-    assertBlockingDag(cluster, executionGraph);
+    assertWorkflowValid(cluster, workflow);
     const projectRoot = cluster.projectRoot?.trim() || cluster.sourceFolderPath?.trim() || null;
     if (projectRoot) {
       if (!isAbsolute(projectRoot)) throw new Error('项目根目录必须是绝对路径，无法启动隔离运行');
@@ -3213,22 +4750,32 @@ export async function startAgentClusterRun(
 	      outputRoot: output.outputRoot,
 	      outputCreatedAt: output.outputCreatedAt,
 	      roundStart: output.roundStart,
-      loopStates: (executionGraph.loops ?? []).map((loop) => ({
-        loopId: loop.loopId,
+      workflowSnapshot: structuredClone(workflow),
+      nodeRuns: workflow.nodes.map((node) => ({
+        nodeId: node.nodeId,
+        status: 'pending',
+        attempt: 0,
+        updatedAt: now,
+      })),
+      harnessStatus: 'running',
+      loopStates: workflow.nodes.filter((node): node is WorkflowLoopNode => node.type === 'loop').map((loop) => ({
+        loopId: loop.nodeId,
         currentIteration: 1,
         repeatCount: loop.repeatCount,
         status: loop.repeatCount > 1 ? 'running' : 'completed',
         updatedAt: now,
       })),
       childRuns: cluster.agents.map((agent) => {
+        const workflowNode = workflow.nodes.find((node) => workflowNodeIsAgent(node) && node.agentId === agent.agentId);
         const expectedArtifacts = expectedArtifactNamesForAgent(agent);
         const candidateTarget = inferCandidateTarget(cluster, agent);
         const agentDir = getAgentOutputDirName(agent);
         return {
           agentId: agent.agentId,
+          workflowNodeId: workflowNode?.nodeId,
           sessionKey: buildAgentChildSessionKey(cluster, runId, agent.agentId, now),
           runId: '',
-          status: getBlockingUpstreamAgentIds(cluster, agent.agentId).length > 0 ? 'blocked' : 'starting',
+          status: 'blocked',
           submitStatus: 'pending',
           expectedArtifacts,
           artifactValidationStatus: expectedArtifacts.length > 0 ? 'pending' : undefined,
@@ -3249,6 +4796,17 @@ export async function startAgentClusterRun(
       updatedAt: now,
       timeoutAt: new Date(Date.now() + RUN_TIMEOUT_MS).toISOString(),
     };
+    advanceDeterministicWorkflowNodes(cluster, run, now);
+    for (const child of run.childRuns) {
+      const ready = child.workflowNodeId ? isWorkflowAgentNodeReady(run, child.workflowNodeId) : getBlockingUpstreamAgentIds(cluster, child.agentId).length === 0;
+      child.status = ready ? 'starting' : 'blocked';
+      const nodeRun = child.workflowNodeId ? workflowNodeRun(run, child.workflowNodeId) : undefined;
+      if (nodeRun) {
+        nodeRun.status = ready ? 'ready' : 'waiting';
+        nodeRun.waitingReason = ready ? undefined : '等待 Harness 上游节点完成';
+      }
+    }
+    updateWorkflowCheckpoint(run, now);
 
     cluster.runs = [run, ...(cluster.runs ?? [])];
     cluster.activeRunId = runId;
@@ -3256,10 +4814,10 @@ export async function startAgentClusterRun(
     addClusterEvent(cluster, {
 	        runId,
 	        agentId: null,
-	        title: '启动 Agent 集群 DAG 调度',
+        title: '启动 Agent Harness Workflow',
 	        content: projectRoot
-	          ? `将按已确认编排图提交 ${cluster.agents.length} 个 Agent；blocks/reviews 上游完成后才会解锁下游。项目根目录约束会写入子 Agent prompt：${projectRoot}；本次输出版本：${output.outputVersion ?? '未配置'}；从 round ${output.roundStart} 开始。`
-	          : `将按已确认编排图提交 ${cluster.agents.length} 个 Agent；blocks/reviews 上游完成后才会解锁下游。`,
+	          ? `将按 Workflow v${workflow.version} 执行 ${workflow.nodes.length} 个节点，最大并发 ${workflow.policy.maxConcurrency}。项目根目录约束会写入子 Agent prompt：${projectRoot}；本次输出版本：${output.outputVersion ?? '未配置'}；从 round ${output.roundStart} 开始。`
+	          : `将按 Workflow v${workflow.version} 执行 ${workflow.nodes.length} 个节点，最大并发 ${workflow.policy.maxConcurrency}。`,
 	        level: 'info',
         createdAt: now,
     });
@@ -3267,19 +4825,20 @@ export async function startAgentClusterRun(
     for (const agent of cluster.agents) {
       const child = run.childRuns.find((item) => item.agentId === agent.agentId);
       if (!child) continue;
+      const ready = child.workflowNodeId ? isWorkflowAgentNodeReady(run, child.workflowNodeId) : false;
       const upstreamIds = getBlockingUpstreamAgentIds(cluster, agent.agentId);
-      agent.status = upstreamIds.length > 0 ? 'waiting' : 'running';
+      agent.status = ready ? 'running' : 'waiting';
       agent.localContext.status = agent.status;
-      agent.currentTask = upstreamIds.length > 0
+      agent.currentTask = !ready
         ? `等待上游完成：${upstreamIds.map((agentId) => cluster.agents.find((item) => item.agentId === agentId)?.name ?? agentId).join('、')}`
-        : '等待 DAG 调度器提交子会话';
+        : '等待 Harness 提交子会话';
       agent.lastActivityAt = now;
       agent.runtimeSessionKey = child.sessionKey;
       agent.runtimeRunId = child.runId;
       addClusterEvent(cluster, {
         runId,
         agentId: agent.agentId,
-        title: upstreamIds.length > 0 ? '等待上游 Agent' : '准备启动子会话',
+        title: !ready ? '等待上游节点' : '准备启动子会话',
         content: agent.currentTask,
         level: 'info',
         createdAt: now,
@@ -3307,11 +4866,19 @@ export async function recordAgentClusterRuntimeEvent(payload: unknown, eventBus?
     let changedCluster: AgentCluster | null = null;
 
     for (const cluster of clusters) {
-      const run = (cluster.runs ?? []).find((item) => item.status === 'running' && item.childRuns.some((child) => child.sessionKey === sessionKey));
+      const run = (cluster.runs ?? []).find((item) => {
+        const child = item.childRuns.find((candidate) => candidate.sessionKey === sessionKey);
+        if (!child) return false;
+        const isActiveRun = (item.status === 'running' || item.status === 'blocked')
+          && item.harnessStatus === 'running'
+          && cluster.activeRunId === item.runId;
+        return isActiveRun || canRecoverTimedOutRunFromChild(cluster, item, child);
+      });
       if (!run) continue;
       const child = run.childRuns.find((item) => item.sessionKey === sessionKey);
       const agent = child ? cluster.agents.find((item) => item.agentId === child.agentId) : null;
       if (!child || !agent) continue;
+      const recoveringTimedOutRun = canRecoverTimedOutRunFromChild(cluster, run, child);
 
       const summary = summarizeRuntimeEvent(payload);
       if (child.status === 'completed') {
@@ -3322,19 +4889,13 @@ export async function recordAgentClusterRuntimeEvent(payload: unknown, eventBus?
         agent.status = 'done';
         agent.localContext.status = 'done';
         agent.lastActivityAt = now;
-        cluster.events = [
-          {
-            eventId: randomUUID(),
-            clusterId: cluster.clusterId,
-            runId: run.runId,
-            agentId: agent.agentId,
-            ...summary,
-            createdAt: now,
-          },
-          ...(cluster.events ?? []),
-        ].slice(0, 500);
+        const eventChanged = appendRuntimeEventIfVisible(cluster, {
+          runId: run.runId,
+          agentId: agent.agentId,
+          ...summary,
+        }, now);
         updateRootRunStatus(cluster, run, now);
-        cluster.updatedAt = now;
+        if (eventChanged) cluster.updatedAt = now;
         changedCluster = cluster;
         continue;
       }
@@ -3350,6 +4911,18 @@ export async function recordAgentClusterRuntimeEvent(payload: unknown, eventBus?
               artifacts: [],
             }
           : null);
+      if (recoveringTimedOutRun && !completion?.completed) continue;
+      if (recoveringTimedOutRun && completion?.completed) {
+        recoverTimedOutRunForLateCompletion(cluster, run, now);
+        addClusterEvent(cluster, {
+          runId: run.runId,
+          agentId: agent.agentId,
+          title: '迟到完成恢复',
+          content: `${agent.name} 在 run 超时后返回了结构化完成信号；Harness 将校验当前 round 产物并继续推进。`,
+          level: 'warning',
+          createdAt: now,
+        });
+      }
       child.status = summary.level === 'error'
         ? 'error'
         : 'running';
@@ -3360,7 +4933,19 @@ export async function recordAgentClusterRuntimeEvent(payload: unknown, eventBus?
       if (summary.level === 'error') child.error = summary.content;
       const maybeRunId = (payload as { params?: { runId?: unknown }; runId?: unknown })?.params?.runId
         ?? (payload as { runId?: unknown })?.runId;
+      const runIdChanged = typeof maybeRunId === 'string' && maybeRunId && child.runId !== maybeRunId;
       if (typeof maybeRunId === 'string' && maybeRunId) child.runId = maybeRunId;
+
+      if (!completion?.completed && summary.display === 'silent' && summary.level === 'info') {
+        if (runIdChanged) {
+          syncAgentWorkflowNodeRun(run, child, now);
+          updateRootRunStatus(cluster, run, now);
+          updateWorkflowCheckpoint(run, now);
+          cluster.updatedAt = now;
+          changedCluster = cluster;
+        }
+        continue;
+      }
 
       if (completion?.completed) {
         try {
@@ -3377,19 +4962,20 @@ export async function recordAgentClusterRuntimeEvent(payload: unknown, eventBus?
         agent.runtimeRunId = child.runId;
         agent.runtimeSessionKey = child.sessionKey;
       }
-      cluster.events = [
-        {
-          eventId: randomUUID(),
-          clusterId: cluster.clusterId,
-          runId: run.runId,
-          agentId: agent.agentId,
-          ...summary,
-          createdAt: now,
-        },
-        ...(cluster.events ?? []),
-      ].slice(0, 500);
+      syncAgentWorkflowNodeRun(run, child, now);
+      applyWorkflowFailurePolicy(cluster, run, child, agent, now);
+      syncAgentWorkflowNodeRun(run, child, now);
+      advanceDeterministicWorkflowNodes(cluster, run, now);
+      const eventChanged = appendRuntimeEventIfVisible(cluster, {
+        runId: run.runId,
+        agentId: agent.agentId,
+        ...summary,
+      }, now);
       updateRootRunStatus(cluster, run, now);
-      cluster.updatedAt = now;
+      updateWorkflowCheckpoint(run, now);
+      if (eventChanged || summary.level !== 'info' || summary.display !== 'silent') {
+        cluster.updatedAt = now;
+      }
       changedCluster = cluster;
     }
 
@@ -3401,7 +4987,7 @@ export async function recordAgentClusterRuntimeEvent(payload: unknown, eventBus?
   });
 }
 
-function getMessageContentText(message: Record<string, unknown>): string {
+export function getMessageContentText(message: Record<string, unknown>): string {
   const content = message.content;
   if (typeof content === 'string') return content.trim();
   if (!Array.isArray(content)) return safeStringify(content);
@@ -3418,6 +5004,23 @@ function getMessageContentText(message: Record<string, unknown>): string {
     }
   }
   return parts.filter(Boolean).join('\n').trim();
+}
+
+function hasAssistantTextContent(message: Record<string, unknown>): boolean {
+  const content = message.content;
+  if (typeof content === 'string') return Boolean(content.trim());
+  if (!Array.isArray(content)) return false;
+  return content.some((block) =>
+    block
+    && typeof block === 'object'
+    && typeof (block as Record<string, unknown>).text === 'string'
+    && Boolean(((block as Record<string, unknown>).text as string).trim())
+  );
+}
+
+export function isLowSignalTranscriptActivity(message: Record<string, unknown>, content: string): boolean {
+  if (hasAssistantTextContent(message)) return false;
+  return /^(调用工具：[^。\n]+|工具返回结果。|模型正在思考并规划下一步。)(\n(?:调用工具：[^。\n]+|工具返回结果。|模型正在思考并规划下一步。))*$/u.test(content.trim());
 }
 
 function resolveAgentReference(cluster: AgentCluster, reference: string): string | null {
@@ -3515,6 +5118,7 @@ async function applyAgentCompletionSignal(
   child.completedAt = now;
   child.updatedAt = now;
   child.lastEventAt = now;
+  extendRunTimeout(run, now, true);
   child.error = undefined;
   child.runtimeWaitReason = undefined;
   child.artifactValidationError = undefined;
@@ -3537,6 +5141,15 @@ async function applyAgentCompletionSignal(
       createdAt: now,
     },
   ].slice(-20);
+  const completedNodeRun = child.workflowNodeId ? workflowNodeRun(run, child.workflowNodeId) : undefined;
+  if (completedNodeRun) {
+    completedNodeRun.output = {
+      ...(completedNodeRun.output ?? {}),
+      summary: completion.summary,
+      artifacts: validatedArtifacts,
+      count: child.actualCandidateCount,
+    };
+  }
 
   cluster.sharedContext.agentSummaries = [
     ...(cluster.sharedContext.agentSummaries ?? []).filter((summary) => summary.agentId !== agent.agentId),
@@ -3564,6 +5177,53 @@ async function applyAgentCompletionSignal(
     ].slice(-30);
   }
 
+  const workflowNode = run.workflowSnapshot?.nodes.find((node) => node.nodeId === child.workflowNodeId);
+  if (workflowNode?.type === 'review') {
+    const verdict = content.match(/\[review\s*:\s*(pass|revise|fail)\s*\]/i)?.[1]?.toLowerCase();
+    const nodeRun = workflowNodeRun(run, workflowNode.nodeId);
+    if (nodeRun) {
+      nodeRun.output = { ...(nodeRun.output ?? {}), verdict: verdict ?? 'pass', summary: completion.summary };
+    }
+    if (verdict === 'revise' && workflowNode.reviseTargetNodeId) {
+      const targetNode = run.workflowSnapshot?.nodes.find((node) => node.nodeId === workflowNode.reviseTargetNodeId);
+      const targetChild = targetNode && workflowNodeIsAgent(targetNode)
+        ? run.childRuns.find((item) => item.agentId === targetNode.agentId)
+        : undefined;
+      const targetAgent = targetChild ? cluster.agents.find((item) => item.agentId === targetChild.agentId) : undefined;
+      const retryPolicy = workflowNode.retryPolicy ?? run.workflowSnapshot?.policy.defaultRetryPolicy ?? defaultWorkflowPolicy().defaultRetryPolicy;
+      const targetNodeRun = targetNode ? workflowNodeRun(run, targetNode.nodeId) : undefined;
+      if (targetChild && targetAgent && (targetNodeRun?.attempt ?? 0) < retryPolicy.maxAttempts) {
+        resetChildForRerun(cluster, run, targetChild, targetAgent, 'starting', now, targetChild.iteration);
+        resetChildForRerun(cluster, run, child, agent, 'blocked', now, child.iteration);
+        child.runtimeWaitReason = `等待 ${targetAgent.name} 按审查意见修订`;
+        run.status = 'running';
+        run.harnessStatus = 'running';
+        run.error = undefined;
+        run.completedAt = undefined;
+        cluster.activeRunId = run.runId;
+        addClusterEvent(cluster, {
+          runId: run.runId,
+          agentId: agent.agentId,
+          title: '审查要求修订',
+          content: `${agent.name} 已将工作退回 ${targetAgent.name}，Harness 将在修订完成后重新执行审查。`,
+          level: 'warning',
+          createdAt: now,
+        });
+        updateWorkflowCheckpoint(run, now);
+        return;
+      }
+      run.harnessStatus = 'paused';
+      run.status = 'running';
+      child.status = 'blocked';
+      child.runtimeWaitReason = '审查要求修订，但目标节点已达到重试上限';
+    } else if (verdict === 'fail') {
+      run.harnessStatus = 'paused';
+      run.status = 'running';
+      child.status = 'blocked';
+      child.runtimeWaitReason = '审查失败，等待用户处理';
+    }
+  }
+
   addClusterEvent(cluster, {
     runId: run.runId,
     agentId: agent.agentId,
@@ -3575,6 +5235,9 @@ async function applyAgentCompletionSignal(
     createdAt: now,
   });
   maybeAdvanceExecutionLoops(cluster, run, agent.agentId, now);
+  syncAgentWorkflowNodeRun(run, child, now);
+  advanceDeterministicWorkflowNodes(cluster, run, now);
+  updateWorkflowCheckpoint(run, now);
 }
 
 async function recoverAgentCompletionFromArtifacts(
@@ -3613,6 +5276,61 @@ async function recoverAgentCompletionFromArtifacts(
     });
   }
   return !wasPassed;
+}
+
+async function recoverChildRuntimeSessionFailure(
+  cluster: AgentCluster,
+  run: AgentClusterRun,
+  child: AgentClusterChildRun,
+  agent: ClusterAgent,
+  now: string,
+): Promise<boolean> {
+  if (child.status === 'completed' || child.status === 'aborted' || child.status === 'error' || child.status === 'timeout') {
+    return false;
+  }
+  if (!child.sessionKey || child.submitStatus !== 'submitted') return false;
+
+  const entry = await readRuntimeSessionStoreEntry(child.sessionKey);
+  if (!entry) return false;
+  const reason = summarizeRuntimeSessionFailure(entry);
+  if (!reason) return false;
+
+  child.status = 'error';
+  child.submitStatus = 'failed';
+  child.error = reason;
+  child.runtimeWaitReason = undefined;
+  child.updatedAt = now;
+  child.lastEventAt = now;
+  child.artifactValidationStatus = child.artifactValidationStatus === 'passed' ? child.artifactValidationStatus : 'failed';
+  child.artifactValidationError = child.artifactValidationError ?? reason;
+
+  agent.status = 'error';
+  agent.localContext.status = 'error';
+  agent.currentTask = '子会话失败';
+  agent.runtimeStatusReason = reason;
+  agent.lastActivityAt = now;
+
+  syncAgentWorkflowNodeRun(run, child, now);
+  const nodeRun = child.workflowNodeId ? workflowNodeRun(run, child.workflowNodeId) : undefined;
+  if (nodeRun) {
+    nodeRun.status = 'failed';
+    nodeRun.error = reason;
+    nodeRun.completedAt = now;
+    nodeRun.updatedAt = now;
+  }
+
+  addClusterEvent(cluster, {
+    runId: run.runId,
+    agentId: agent.agentId,
+    title: '子会话失败',
+    content: reason,
+    level: 'error',
+    createdAt: now,
+  });
+
+  applyWorkflowFailurePolicy(cluster, run, child, agent, now);
+  updateWorkflowCheckpoint(run, now);
+  return true;
 }
 
 function getTranscriptMessageId(message: Record<string, unknown>, index: number): string {
@@ -3673,16 +5391,24 @@ async function refreshRunEventsLocked(
         const fullContent = getMessageContentText(message);
         const content = compactText(fullContent, 500);
         if (!content) continue;
-        addClusterEvent(cluster, {
-          runId: run.runId,
-          agentId: agent.agentId,
-          title: role === 'assistant' ? '子会话输出' : '工具事件',
-          content,
-          level: 'info',
-          raw: message,
-          createdAt: now,
-        });
+        const lowSignalActivity = isLowSignalTranscriptActivity(message, content);
+        mergeWorkflowTokenUsage(
+          child.workflowNodeId ? workflowNodeRun(run, child.workflowNodeId) : undefined,
+          message,
+        );
         const completion = role === 'assistant' ? parseCompletionSignal(cluster, agent, fullContent) : null;
+        if (!lowSignalActivity || completion?.completed) {
+          addClusterEvent(cluster, {
+            runId: run.runId,
+            agentId: agent.agentId,
+            title: role === 'assistant' ? '子会话输出' : '工具事件',
+            content,
+            level: 'info',
+            display: lowSignalActivity ? 'silent' : 'visible',
+            raw: message,
+            createdAt: now,
+          });
+        }
         if (completion?.completed) {
           try {
             await applyAgentCompletionSignal(cluster, run, child, agent, completion, fullContent, now);
@@ -3691,32 +5417,49 @@ async function refreshRunEventsLocked(
           }
         } else {
           agent.currentTask = content;
-          agent.runtimeStatusReason = role === 'assistant' ? '子会话输出' : '工具事件';
+          agent.runtimeStatusReason = lowSignalActivity ? '子会话活动' : role === 'assistant' ? '子会话输出' : '工具事件';
           agent.lastActivityAt = now;
           child.lastEventAt = now;
           child.runtimeWaitReason = undefined;
           if (child.status !== 'completed') child.status = 'running';
           child.submitStatus = 'submitted';
         }
+        if (extendRunTimeout(run, now)) changed = true;
         changed = true;
       }
       if (messages.length > 0) {
         child.lastTranscriptMessageId = getTranscriptMessageId(messages[messages.length - 1], messages.length - 1);
       }
+      syncAgentWorkflowNodeRun(run, child, now);
       if (await recoverAgentCompletionFromArtifacts(cluster, run, child, agent, now)) {
         changed = true;
         continue;
       }
+      if (await recoverChildRuntimeSessionFailure(cluster, run, child, agent, now)) {
+        changed = true;
+        continue;
+      }
     } catch (error) {
-      addClusterEvent(cluster, {
-        runId: run.runId,
-        agentId: agent.agentId,
-        title: '读取子会话历史失败',
-        content: error instanceof Error ? error.message : String(error),
-        level: 'warning',
-        createdAt: now,
-      });
+      const message = `读取子会话历史失败：${error instanceof Error ? error.message : String(error)}`;
+      if (child.runtimeWaitReason !== message) {
+        child.runtimeWaitReason = message;
+        child.updatedAt = now;
+        agent.runtimeStatusReason = '等待 Gateway';
+        addClusterEvent(cluster, {
+          runId: run.runId,
+          agentId: agent.agentId,
+          title: '读取子会话历史失败',
+          content: message,
+          level: 'warning',
+          createdAt: now,
+        });
+        changed = true;
+      }
+    }
+
+    if (await recoverChildRuntimeSessionFailure(cluster, run, child, agent, now)) {
       changed = true;
+      continue;
     }
 
     if (child.status === 'completed' || child.status === 'error' || child.status === 'timeout') continue;
@@ -3724,14 +5467,14 @@ async function refreshRunEventsLocked(
     if (Date.now() - lastEventMs > CHILD_NO_EVENT_TIMEOUT_MS) {
       const waitReason = '超过 5 分钟没有新的 Gateway 事件或 transcript 更新，系统会继续自动轮询子会话历史和本轮产物。';
       const shouldEmitWaitEvent = child.runtimeWaitReason !== waitReason;
-      child.status = child.status === 'blocked' ? 'blocked' : 'running';
-      child.runtimeWaitReason = waitReason;
-      child.updatedAt = now;
-      agent.status = child.status === 'blocked' ? 'waiting' : 'running';
-      agent.localContext.status = agent.status;
-      agent.currentTask = '等待子会话产物';
-      agent.runtimeStatusReason = '等待产物';
       if (shouldEmitWaitEvent) {
+        child.status = child.status === 'blocked' ? 'blocked' : 'running';
+        child.runtimeWaitReason = waitReason;
+        child.updatedAt = now;
+        agent.status = child.status === 'blocked' ? 'waiting' : 'running';
+        agent.localContext.status = agent.status;
+        agent.currentTask = '等待子会话产物';
+        agent.runtimeStatusReason = '等待产物';
         addClusterEvent(cluster, {
           runId: run.runId,
           agentId: agent.agentId,
@@ -3740,19 +5483,47 @@ async function refreshRunEventsLocked(
           level: 'info',
           createdAt: now,
         });
+        changed = true;
       }
-      changed = true;
     }
   }
   if (await reconcileRunArtifacts(cluster, run, now)) {
     changed = true;
   }
+  if (advanceDeterministicWorkflowNodes(cluster, run, now)) {
+    changed = true;
+  }
+  const rootStateBefore = JSON.stringify({
+    status: run.status,
+    harnessStatus: run.harnessStatus,
+    error: run.error,
+    completedAt: run.completedAt,
+    activeRunId: cluster.activeRunId,
+    submittedChildCount: run.submittedChildCount,
+    completedChildCount: run.completedChildCount,
+    failedChildCount: run.failedChildCount,
+  });
   updateRootRunStatus(cluster, run, now);
+  const rootStateAfter = JSON.stringify({
+    status: run.status,
+    harnessStatus: run.harnessStatus,
+    error: run.error,
+    completedAt: run.completedAt,
+    activeRunId: cluster.activeRunId,
+    submittedChildCount: run.submittedChildCount,
+    completedChildCount: run.completedChildCount,
+    failedChildCount: run.failedChildCount,
+  });
+  if (rootStateBefore !== rootStateAfter) changed = true;
   if (run.status === 'running' && !cluster.activeRunId) {
     cluster.activeRunId = run.runId;
+    changed = true;
   }
   run.watchdogStatus = cluster.activeRunId === run.runId ? 'watching' : 'settled';
-  cluster.updatedAt = now;
+  if (changed) {
+    updateWorkflowCheckpoint(run, now);
+    cluster.updatedAt = now;
+  }
   return changed;
 }
 
@@ -3768,14 +5539,251 @@ export async function refreshAgentClusterRunEvents(
     if (index === -1) throw new Error('Agent Cluster not found');
     const cluster = clusters[index];
     const run = findRun(cluster, runId);
-    await refreshRunEventsLocked(cluster, run, gatewayManager);
+    const changed = await refreshRunEventsLocked(cluster, run, gatewayManager);
+    if (changed) {
+      clusters[index] = cluster;
+      await writeClusters(clusters);
+      eventBus?.emit('agent-cluster:updated', { cluster });
+    }
+    return cluster;
+  });
+  if (cluster.activeRunId === runId) {
+    void submitReadyAgentClusterChildren(clusterId, runId, gatewayManager, eventBus);
+  }
+  return cluster;
+}
+
+export async function pauseAgentClusterRun(
+  clusterId: string,
+  runId: string,
+  gatewayManager: GatewayManager,
+  eventBus?: HostEventBus,
+): Promise<AgentCluster> {
+  const sessionKeys = await withStoreQueue(async () => {
+    const clusters = await readClusters();
+    const cluster = clusters.find((item) => item.clusterId === clusterId);
+    const run = cluster ? findRun(cluster, runId) : null;
+    return run?.childRuns
+      .filter((child) =>
+        child.status === 'running'
+        || child.status === 'starting'
+        || (child.submitStatus === 'submitted' && child.status !== 'completed' && child.status !== 'aborted')
+      )
+      .map((child) => child.sessionKey) ?? [];
+  });
+  await Promise.allSettled(sessionKeys.map((sessionKey) => gatewayManager.rpc('chat.abort', { sessionKey }, 5_000)));
+  clearAgentClusterRunWatchdog(clusterId, runId);
+  const cluster = await withStoreQueue(async () => {
+    const clusters = await readClusters();
+    const index = clusters.findIndex((cluster) => cluster.clusterId === clusterId);
+    if (index === -1) throw new Error('Agent Cluster not found');
+    const cluster = clusters[index];
+    const run = findRun(cluster, runId);
+    if (run.status !== 'running') throw new Error('只有运行中的 Workflow 可以暂停');
+    const now = new Date().toISOString();
+    for (const child of run.childRuns) {
+      if (child.status === 'completed' || child.status === 'aborted' || child.status === 'error' || child.status === 'timeout') continue;
+      if (child.status !== 'running' && child.status !== 'starting' && child.submitStatus !== 'submitted') continue;
+      const agent = cluster.agents.find((item) => item.agentId === child.agentId);
+      resetChildForRerun(cluster, run, child, agent, 'blocked', now, child.iteration);
+      child.runtimeWaitReason = '暂停中，可恢复';
+      if (agent) {
+        agent.status = 'waiting';
+        agent.localContext.status = 'waiting';
+        agent.currentTask = '暂停中，可恢复';
+        agent.runtimeStatusReason = '用户暂停';
+      }
+    }
+    run.harnessStatus = 'paused';
+    run.status = 'blocked';
+    run.pauseRequestedAt = now;
+    run.updatedAt = now;
+    updateWorkflowCheckpoint(run, now);
+    addClusterEvent(cluster, {
+      runId,
+      agentId: null,
+      title: 'Workflow 已暂停',
+      content: 'Harness 已停止提交新节点，并已请求中止当前活动子会话；恢复时会从未完成节点重新提交。',
+      level: 'warning',
+      createdAt: now,
+    });
+    cluster.updatedAt = now;
+    clusters[index] = cluster;
+    await writeClusters(clusters);
+    return cluster;
+  });
+  eventBus?.emit('agent-cluster:updated', { cluster });
+  return cluster;
+}
+
+export async function resumeAgentClusterRun(
+  clusterId: string,
+  runId: string,
+  gatewayManager: GatewayManager,
+  eventBus?: HostEventBus,
+): Promise<AgentCluster> {
+  const cluster = await withStoreQueue(async () => {
+    const clusters = await readClusters();
+    const index = clusters.findIndex((item) => item.clusterId === clusterId);
+    if (index === -1) throw new Error('Agent Cluster not found');
+    const cluster = clusters[index];
+    const run = findRun(cluster, runId);
+    if (run.harnessStatus !== 'paused') throw new Error('Workflow 当前不是暂停状态');
+    const waitingHuman = run.nodeRuns?.some((nodeRun) => nodeRun.status === 'waiting_human');
+    if (waitingHuman) throw new Error('请先处理 Human Gate，再恢复 Workflow');
+    const now = new Date().toISOString();
+    run.harnessStatus = 'running';
+    run.pauseRequestedAt = undefined;
+    run.status = 'running';
+    run.error = undefined;
+    run.completedAt = undefined;
+    run.updatedAt = now;
+    cluster.activeRunId = runId;
+    advanceDeterministicWorkflowNodes(cluster, run, now);
+    updateWorkflowCheckpoint(run, now);
+    addClusterEvent(cluster, {
+      runId,
+      agentId: null,
+      title: 'Workflow 已恢复',
+      content: 'Harness 将从 checkpoint 继续，已完成节点不会重跑。',
+      level: 'success',
+      createdAt: now,
+    });
+    cluster.updatedAt = now;
     clusters[index] = cluster;
     await writeClusters(clusters);
     eventBus?.emit('agent-cluster:updated', { cluster });
     return cluster;
   });
-  if (cluster.activeRunId === runId) {
+  void submitReadyAgentClusterChildren(clusterId, runId, gatewayManager, eventBus);
+  scheduleAgentClusterRunWatchdog(clusterId, runId, gatewayManager, eventBus);
+  return cluster;
+}
+
+export async function stopAgentClusterRun(
+  clusterId: string,
+  runId: string,
+  gatewayManager: GatewayManager,
+  eventBus?: HostEventBus,
+): Promise<AgentCluster> {
+  clearAgentClusterRunWatchdog(clusterId, runId);
+  const sessionKeys = await withStoreQueue(async () => {
+    const clusters = await readClusters();
+    const cluster = clusters.find((item) => item.clusterId === clusterId);
+    const run = cluster ? findRun(cluster, runId) : null;
+    return run?.childRuns
+      .filter((child) =>
+        child.status === 'running'
+        || child.status === 'starting'
+        || (child.submitStatus === 'submitted' && child.status !== 'completed' && child.status !== 'aborted')
+      )
+      .map((child) => child.sessionKey) ?? [];
+  });
+  await Promise.allSettled(sessionKeys.map((sessionKey) => gatewayManager.rpc('chat.abort', { sessionKey }, 5_000)));
+  return withStoreQueue(async () => {
+    const clusters = await readClusters();
+    const index = clusters.findIndex((cluster) => cluster.clusterId === clusterId);
+    if (index === -1) throw new Error('Agent Cluster not found');
+    const cluster = clusters[index];
+    const run = findRun(cluster, runId);
+    const now = new Date().toISOString();
+    for (const child of run.childRuns) {
+      if (child.status === 'completed') continue;
+      child.status = 'aborted';
+      child.completedAt = now;
+      child.updatedAt = now;
+      syncAgentWorkflowNodeRun(run, child, now);
+      const agent = cluster.agents.find((item) => item.agentId === child.agentId);
+      if (agent && agent.status !== 'done') {
+        agent.status = 'idle';
+        agent.localContext.status = 'idle';
+        agent.currentTask = '运行已停止';
+        agent.runtimeStatusReason = '用户停止';
+      }
+    }
+    for (const nodeRun of run.nodeRuns ?? []) {
+      if (!workflowNodeSucceeded(nodeRun.status)) {
+        nodeRun.status = 'aborted';
+        nodeRun.updatedAt = now;
+        nodeRun.completedAt = now;
+      }
+    }
+    run.status = 'aborted';
+    run.harnessStatus = 'aborted';
+    run.stopRequestedAt = now;
+    run.stoppedAt = now;
+    run.completedAt = now;
+    run.updatedAt = now;
+    cluster.activeRunId = null;
+    updateWorkflowCheckpoint(run, now);
+    addClusterEvent(cluster, {
+      runId,
+      agentId: null,
+      title: 'Workflow 已停止',
+      content: '活动子会话已请求中止，已完成节点和 checkpoint 保留。',
+      level: 'warning',
+      createdAt: now,
+    });
+    cluster.updatedAt = now;
+    clusters[index] = cluster;
+    await writeClusters(clusters);
+    eventBus?.emit('agent-cluster:updated', { cluster });
+    return cluster;
+  });
+}
+
+export async function decideAgentClusterHumanGate(
+  clusterId: string,
+  runId: string,
+  nodeId: string,
+  decision: 'approve' | 'reject',
+  gatewayManager: GatewayManager,
+  eventBus?: HostEventBus,
+): Promise<AgentCluster> {
+  const cluster = await withStoreQueue(async () => {
+    const clusters = await readClusters();
+    const index = clusters.findIndex((item) => item.clusterId === clusterId);
+    if (index === -1) throw new Error('Agent Cluster not found');
+    const cluster = clusters[index];
+    const run = findRun(cluster, runId);
+    const node = run.workflowSnapshot?.nodes.find((item) => item.nodeId === nodeId);
+    const nodeRun = workflowNodeRun(run, nodeId);
+    if (!node || node.type !== 'human_gate' || !nodeRun) throw new Error('Human Gate not found');
+    if (nodeRun.status !== 'waiting_human') throw new Error('Human Gate 当前不等待决策');
+    const now = new Date().toISOString();
+    if (decision === 'approve') {
+      nodeRun.status = 'completed';
+      nodeRun.output = { decision: 'approve' };
+      nodeRun.completedAt = now;
+      run.harnessStatus = 'running';
+      run.status = 'running';
+      cluster.activeRunId = runId;
+    } else {
+      nodeRun.status = 'failed';
+      nodeRun.output = { decision: 'reject' };
+      nodeRun.error = '用户拒绝继续';
+      run.harnessStatus = 'paused';
+    }
+    nodeRun.updatedAt = now;
+    advanceDeterministicWorkflowNodes(cluster, run, now);
+    updateWorkflowCheckpoint(run, now);
+    addClusterEvent(cluster, {
+      runId,
+      agentId: null,
+      title: decision === 'approve' ? '人工确认通过' : '人工确认拒绝',
+      content: node.name,
+      level: decision === 'approve' ? 'success' : 'warning',
+      createdAt: now,
+    });
+    cluster.updatedAt = now;
+    clusters[index] = cluster;
+    await writeClusters(clusters);
+    eventBus?.emit('agent-cluster:updated', { cluster });
+    return cluster;
+  });
+  if (decision === 'approve') {
     void submitReadyAgentClusterChildren(clusterId, runId, gatewayManager, eventBus);
+    scheduleAgentClusterRunWatchdog(clusterId, runId, gatewayManager, eventBus);
   }
   return cluster;
 }
@@ -3929,7 +5937,10 @@ export async function skipAgentClusterRunAgent(
       createdAt: now,
     });
     maybeAdvanceExecutionLoops(cluster, run, agentId, now);
+    syncAgentWorkflowNodeRun(run, child, now);
+    advanceDeterministicWorkflowNodes(cluster, run, now);
     updateRootRunStatus(cluster, run, now);
+    updateWorkflowCheckpoint(run, now);
     cluster.updatedAt = now;
     clusters[index] = cluster;
     await writeClusters(clusters);
@@ -4075,7 +6086,12 @@ function scheduleAgentClusterRunWatchdog(
     void refreshAgentClusterRunEvents(clusterId, runId, gatewayManager, eventBus)
       .then((cluster) => {
         const run = (cluster.runs ?? []).find((item) => item.runId === runId);
-        if (run && cluster.activeRunId === runId && run.status === 'running') {
+        if (
+          run
+          && cluster.activeRunId === runId
+          && (run.status === 'running' || run.status === 'blocked')
+          && (run.harnessStatus === 'running' || run.harnessStatus === 'paused' || run.harnessStatus === 'waiting_human')
+        ) {
           scheduleAgentClusterRunWatchdog(clusterId, runId, gatewayManager, eventBus);
         } else {
           runWatchdogs.delete(key);
@@ -4087,6 +6103,55 @@ function scheduleAgentClusterRunWatchdog(
   }, RUN_WATCHDOG_INTERVAL_MS);
   timer.unref?.();
   runWatchdogs.set(key, timer);
+}
+
+function clearAgentClusterRunWatchdog(clusterId: string, runId: string): void {
+  const key = `${clusterId}:${runId}`;
+  const existing = runWatchdogs.get(key);
+  if (existing) clearTimeout(existing);
+  runWatchdogs.delete(key);
+}
+
+export async function recoverActiveAgentClusterRuns(
+  gatewayManager: GatewayManager,
+  eventBus?: HostEventBus,
+): Promise<void> {
+  const activeRuns = await withStoreQueue(async () => {
+    const clusters = await readClusters();
+    const now = new Date().toISOString();
+    const result: Array<{ clusterId: string; runId: string }> = [];
+    let changed = false;
+    for (const cluster of clusters) {
+      const run = (cluster.runs ?? []).find((item) =>
+        item.runId === cluster.activeRunId
+        && (item.status === 'running' || item.status === 'blocked')
+      );
+      if (!run || run.harnessStatus === 'aborted' || run.harnessStatus === 'completed') continue;
+      for (const nodeRun of run.nodeRuns ?? []) {
+        if (nodeRun.status === 'running' || nodeRun.status === 'ready') {
+          nodeRun.status = 'recovering';
+          nodeRun.waitingReason = '应用重启后正在核对子会话和产物';
+          nodeRun.updatedAt = now;
+          changed = true;
+        }
+      }
+      for (const child of run.childRuns) {
+        if (child.status === 'running' || child.status === 'starting') {
+          child.runtimeWaitReason = '应用重启后正在恢复';
+          child.updatedAt = now;
+          changed = true;
+        }
+      }
+      updateWorkflowCheckpoint(run, now);
+      result.push({ clusterId: cluster.clusterId, runId: run.runId });
+    }
+    if (changed) await writeClusters(clusters);
+    return result;
+  });
+  for (const active of activeRuns) {
+    await refreshAgentClusterRunEvents(active.clusterId, active.runId, gatewayManager, eventBus).catch(() => undefined);
+    scheduleAgentClusterRunWatchdog(active.clusterId, active.runId, gatewayManager, eventBus);
+  }
 }
 
 export async function listAgentClusters(): Promise<AgentCluster[]> {
@@ -4312,6 +6377,19 @@ export async function sendAgentClusterManagerMessage(
         label: edge.label?.trim() || executionTypeLabelForManager(normalizeExecutionType(edge)),
         reason: edge.reason?.trim(),
       })),
+      workflowNodeDrafts: (decision.workflowNodeDrafts ?? [])
+        .filter((draft) => ['fan_out', 'join', 'gate', 'loop', 'human_gate'].includes(draft.type))
+        .map((draft) => ({
+          ...draft,
+          name: compactText(draft.name?.trim() || executionTypeLabelForManager('informs'), 80),
+          description: draft.description?.trim(),
+          upstreamAgentNames: coerceStringArray(draft.upstreamAgentNames),
+          downstreamAgentNames: coerceStringArray(draft.downstreamAgentNames),
+          concurrency: draft.concurrency ? Math.max(1, Math.min(16, Math.floor(draft.concurrency))) : undefined,
+          minimumSuccess: draft.minimumSuccess ? Math.max(1, Math.floor(draft.minimumSuccess)) : undefined,
+          minimumCount: draft.minimumCount ? Math.max(1, Math.floor(draft.minimumCount)) : undefined,
+          repeatCount: draft.repeatCount ? Math.max(1, Math.min(MAX_WORKFLOW_LOOP_COUNT, Math.floor(draft.repeatCount))) : undefined,
+        })),
       sharedContextSummary: decision.sharedContextSummary?.trim() || updates.summary?.trim() || coerceStringArray(updates.decisions)[0],
       recommendedResumeFromAgentId: resumeAgentId,
       recommendedResumeFromAgentName: decision.recommendedResumeFromAgentName ?? null,
@@ -4341,6 +6419,7 @@ export async function sendAgentClusterManagerMessage(
         patchEntries.length > 0 ? `Prompt 修改 ${patchEntries.length} 项` : '',
         proposal.agentDrafts.length > 0 ? `新增 Agent ${proposal.agentDrafts.length} 个` : '',
         proposal.edgeDrafts.length > 0 ? `新增/修改关系 ${proposal.edgeDrafts.length} 条` : '',
+        (proposal.workflowNodeDrafts?.length ?? 0) > 0 ? `Harness 算子 ${proposal.workflowNodeDrafts?.length} 个` : '',
         resumeAgentId ? `建议从 ${cluster.agents.find((agent) => agent.agentId === resumeAgentId)?.name ?? resumeAgentId} 继续运行` : '',
       ].filter(Boolean).join('；'),
       level: 'info',
@@ -4371,7 +6450,9 @@ export async function applyAgentClusterManagerProposal(
 
     const now = new Date().toISOString();
     const createdAgentIdsByName = new Map<string, string>();
-    const graphChanged = proposal.agentDrafts.length > 0 || proposal.edgeDrafts.length > 0;
+    const graphChanged = proposal.agentDrafts.length > 0
+      || proposal.edgeDrafts.length > 0
+      || (proposal.workflowNodeDrafts?.length ?? 0) > 0;
 
     for (const draft of proposal.agentDrafts) {
       const agent = buildAgent(cluster.clusterId, {
@@ -4472,6 +6553,70 @@ export async function applyAgentClusterManagerProposal(
       });
       cluster.executionGraph = graph;
       cluster.edges = graph.edges;
+      const nextVersion = Math.max(0, ...(cluster.workflows ?? []).map((workflow) => workflow.version)) + 1;
+      const workflow = buildWorkflowFromExecutionGraph(cluster.clusterId, cluster.agents, graph, 'manager', nextVersion, now);
+      for (const draft of proposal.workflowNodeDrafts ?? []) {
+        const nodeId = `${draft.type}:${randomUUID()}`;
+        const base = {
+          nodeId,
+          type: draft.type,
+          name: draft.name,
+          description: draft.description,
+        };
+        const node: WorkflowNode = draft.type === 'fan_out'
+          ? { ...base, type: 'fan_out', concurrency: draft.concurrency ?? DEFAULT_WORKFLOW_CONCURRENCY }
+          : draft.type === 'join'
+            ? { ...base, type: 'join', mode: draft.joinMode === 'minimum' ? 'minimum' : 'all', minimumSuccess: draft.minimumSuccess }
+            : draft.type === 'gate'
+              ? { ...base, type: 'gate', gateKind: draft.gateKind ?? 'completion', minimumCount: draft.minimumCount }
+              : draft.type === 'loop'
+                ? {
+                    ...base,
+                    type: 'loop',
+                    bodyNodeIds: coerceStringArray(draft.upstreamAgentNames)
+                      .map((name) => resolveAgentReference(cluster, name))
+                      .filter((agentId): agentId is string => Boolean(agentId))
+                      .map(workflowAgentNodeId),
+                    repeatCount: draft.repeatCount ?? 2,
+                  }
+                : { ...base, type: 'human_gate', prompt: draft.prompt?.trim() || '请确认是否继续执行。' };
+        workflow.nodes.push(node);
+        const upstreamNodeIds = coerceStringArray(draft.upstreamAgentNames)
+          .map((name) => resolveAgentReference(cluster, name))
+          .filter((agentId): agentId is string => Boolean(agentId))
+          .map(workflowAgentNodeId);
+        const downstreamNodeIds = coerceStringArray(draft.downstreamAgentNames)
+          .map((name) => resolveAgentReference(cluster, name))
+          .filter((agentId): agentId is string => Boolean(agentId))
+          .map(workflowAgentNodeId);
+        for (const upstreamNodeId of upstreamNodeIds) {
+          for (const downstreamNodeId of downstreamNodeIds) {
+            workflow.edges = workflow.edges.filter((edge) => !(
+              edge.kind === 'control'
+              && edge.fromNodeId === upstreamNodeId
+              && edge.toNodeId === downstreamNodeId
+            ));
+          }
+          workflow.edges.push({
+            edgeId: randomUUID(),
+            fromNodeId: upstreamNodeId,
+            toNodeId: nodeId,
+            kind: 'control',
+          });
+        }
+        for (const downstreamNodeId of downstreamNodeIds) {
+          workflow.edges.push({
+            edgeId: randomUUID(),
+            fromNodeId: nodeId,
+            toNodeId: downstreamNodeId,
+            kind: 'control',
+          });
+        }
+      }
+      const normalizedWorkflow = normalizeWorkflow(cluster, workflow);
+      assertWorkflowValid(cluster, normalizedWorkflow);
+      cluster.workflows = [normalizedWorkflow, ...(cluster.workflows ?? [])];
+      cluster.currentWorkflowId = normalizedWorkflow.workflowId;
       cluster.orchestrationConfirmedAt = null;
     }
 
@@ -4493,6 +6638,7 @@ export async function applyAgentClusterManagerProposal(
         proposal.promptPatches.length > 0 ? `已写入 ${proposal.promptPatches.length} 个 prompt patch` : '',
         proposal.agentDrafts.length > 0 ? `已新增 ${proposal.agentDrafts.length} 个 Agent` : '',
         newEdges.length > 0 ? `已新增 ${newEdges.length} 条关系` : '',
+        (proposal.workflowNodeDrafts?.length ?? 0) > 0 ? `已新增 ${proposal.workflowNodeDrafts?.length} 个 Harness 算子` : '',
       ].filter(Boolean).join('；') || '提案已应用',
       level: 'success',
       createdAt: now,

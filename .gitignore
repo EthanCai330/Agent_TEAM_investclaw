@@ -64,8 +64,6 @@ resources/bin
 build/
 artifacts/
 docs/pr-session-notes-*.md
-Agent_Swarm_README.md
-项目构建文件/
 
 .cursor/
 .pnpm-store/

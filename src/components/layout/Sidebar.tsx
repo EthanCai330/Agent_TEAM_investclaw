@@ -26,6 +26,7 @@ import {
   ChevronDown,
   ChevronRight,
   RotateCcw,
+  Pin,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useSettingsStore } from '@/stores/settings';
@@ -45,6 +46,7 @@ type SidebarSectionKey = 'agentClusters' | 'projectFolders' | 'unfiledChats';
 const SIDEBAR_SECTION_STATE_KEY = 'investclaw:sidebar-section-state';
 const SIDEBAR_PROJECT_STATE_KEY = 'investclaw:sidebar-project-state';
 const HIDDEN_PROJECT_FOLDERS_KEY = 'investclaw:hidden-project-folders';
+const PINNED_AGENT_CLUSTERS_KEY = 'investclaw:pinned-agent-clusters';
 const DEFAULT_SECTION_STATE: Record<SidebarSectionKey, boolean> = {
   agentClusters: true,
   projectFolders: true,
@@ -71,6 +73,21 @@ function loadHiddenProjectFolders(): string[] {
       : [];
   } catch {
     return [];
+  }
+}
+
+function loadStringRecord(key: string): Record<string, string> {
+  try {
+    const raw = window.localStorage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : {};
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, string] =>
+        typeof entry[0] === 'string' && typeof entry[1] === 'string'
+      ),
+    );
+  } catch {
+    return {};
   }
 }
 
@@ -269,6 +286,9 @@ export function Sidebar() {
     () => loadStoredRecord(SIDEBAR_PROJECT_STATE_KEY, {}),
   );
   const [hiddenProjectFolders, setHiddenProjectFolders] = useState<string[]>(loadHiddenProjectFolders);
+  const [pinnedAgentClusters, setPinnedAgentClusters] = useState<Record<string, string>>(
+    () => loadStringRecord(PINNED_AGENT_CLUSTERS_KEY),
+  );
 
   useEffect(() => {
     void fetchAgents();
@@ -291,8 +311,25 @@ export function Sidebar() {
     { to: '/cron', zoneClass: 'zone-cron', icon: <Clock className="h-[18px] w-[18px]" strokeWidth={2} />, label: t('sidebar.cronTasks'), testId: 'sidebar-nav-cron' },
   ];
   const sortedClusters = useMemo(
-    () => [...clusters].filter((item) => item?.clusterId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
-    [clusters],
+    () => [...clusters].filter((item) => item?.clusterId).sort((a, b) => {
+      const pinnedA = pinnedAgentClusters[a.clusterId];
+      const pinnedB = pinnedAgentClusters[b.clusterId];
+      if (pinnedA || pinnedB) {
+        if (!pinnedA) return 1;
+        if (!pinnedB) return -1;
+        return pinnedB.localeCompare(pinnedA);
+      }
+      const createdA = a.createdAt || '';
+      const createdB = b.createdAt || '';
+      if (createdA || createdB) {
+        if (!createdA) return 1;
+        if (!createdB) return -1;
+        const byCreatedAt = createdB.localeCompare(createdA);
+        if (byCreatedAt !== 0) return byCreatedAt;
+      }
+      return (a.clusterName || a.clusterId).localeCompare(b.clusterName || b.clusterId);
+    }),
+    [clusters, pinnedAgentClusters],
   );
   const ordinarySessions = useMemo(
     () => [...sessions]
@@ -360,6 +397,19 @@ export function Sidebar() {
     setSectionState((current) => {
       const next = { ...current, [section]: !current[section] };
       persistLocalState(SIDEBAR_SECTION_STATE_KEY, next);
+      return next;
+    });
+  };
+
+  const togglePinnedAgentCluster = (clusterId: string) => {
+    setPinnedAgentClusters((current) => {
+      const next = { ...current };
+      if (next[clusterId]) {
+        delete next[clusterId];
+      } else {
+        next[clusterId] = new Date().toISOString();
+      }
+      persistLocalState(PINNED_AGENT_CLUSTERS_KEY, next);
       return next;
     });
   };
@@ -636,6 +686,21 @@ export function Sidebar() {
                         </div>
                       ) : (
                         <div className="absolute right-1 top-1.5 flex opacity-0 transition-opacity group-hover/cluster:opacity-100">
+                          <button
+                            data-testid={`sidebar-agent-cluster-pin-${cluster.clusterId}`}
+                            aria-label={pinnedAgentClusters[cluster.clusterId] ? 'Unpin cluster' : 'Pin cluster'}
+                            title={pinnedAgentClusters[cluster.clusterId] ? '取消置顶' : '置顶集群'}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              togglePinnedAgentCluster(cluster.clusterId);
+                            }}
+                            className={cn(
+                              'rounded p-0.5 text-muted-foreground hover:bg-accent/60 hover:text-foreground',
+                              pinnedAgentClusters[cluster.clusterId] && 'text-foreground',
+                            )}
+                          >
+                            <Pin className="h-3.5 w-3.5" />
+                          </button>
                           <button
                             aria-label="Rename cluster"
                             onClick={(e) => {

@@ -1,4 +1,4 @@
-import { type CSSProperties, type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode, useEffect, useMemo, useState } from 'react';
+import { type CSSProperties, type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode, type WheelEvent as ReactWheelEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   AlertCircle,
@@ -16,6 +16,8 @@ import {
   Target,
   Users,
   Play,
+  Pause,
+  Square,
   Pencil,
   Check,
   X,
@@ -36,14 +38,21 @@ import type {
   AgentClusterExecutionGraph,
   AgentClusterExecutionLoop,
   AgentClusterExecutionType,
+  AgentClusterWorkflow,
   AgentClusterManagerProposal,
+  AgentClusterRun,
   AgentClusterChildRun,
   AgentEdge,
   AgentMessage,
   ClusterAgent,
+  CreateAgentClusterAgentRequest,
+  WorkflowEdge,
+  WorkflowNode,
+  WorkflowNodeType,
 } from '@/types/agent-cluster';
 
 type CreateMode = 'new_task' | 'existing_task';
+type AgentClusterCenterTab = 'monitor' | 'workflow' | 'context';
 
 function formatTime(value: string): string {
   try {
@@ -122,6 +131,16 @@ function childRunStatusText(status: AgentClusterChildRun['status']): string {
   }
 }
 
+function runMonitorStatusText(run: AgentClusterRun): string {
+  if (run.harnessStatus === 'paused') return '暂停中，可恢复';
+  if (run.harnessStatus === 'aborted' || run.status === 'aborted') return '已停止，不会继续';
+  if (run.harnessStatus === 'waiting_human') return '等待人工确认';
+  if (run.status === 'running') return '正在执行';
+  if (run.status === 'completed') return '已完成';
+  if (run.status === 'error' || run.status === 'timeout') return '需处理';
+  return '等待事件';
+}
+
 function artifactValidationText(status?: AgentClusterChildRun['artifactValidationStatus']): string | null {
   switch (status) {
     case 'pending':
@@ -149,6 +168,1155 @@ function getClusterExecutionGraph(cluster: AgentCluster): AgentClusterExecutionG
     confirmed: false,
     updatedAt: cluster.updatedAt,
   };
+}
+
+function getCurrentWorkflow(cluster: AgentCluster): AgentClusterWorkflow | null {
+  return cluster.workflows?.find((workflow) => workflow.workflowId === cluster.currentWorkflowId)
+    ?? cluster.workflows?.find((workflow) => workflow.status === 'confirmed')
+    ?? cluster.workflows?.[0]
+    ?? null;
+}
+
+const workflowNodeLabels: Record<WorkflowNodeType, string> = {
+  agent: 'Agent',
+  fan_out: 'Fan-out',
+  join: 'Join',
+  gate: 'Gate',
+  review: 'Review',
+  reduce: 'Reduce',
+  loop: 'Loop',
+  human_gate: 'Human Gate',
+};
+
+function getWorkflowNodeOrder(workflow: AgentClusterWorkflow): WorkflowNode[] {
+  const nodeById = new Map(workflow.nodes.map((node) => [node.nodeId, node]));
+  const incoming = new Map(workflow.nodes.map((node) => [node.nodeId, 0]));
+  const outgoing = new Map(workflow.nodes.map((node) => [node.nodeId, [] as string[]]));
+  for (const edge of workflow.edges.filter((edge) => edge.kind === 'control')) {
+    incoming.set(edge.toNodeId, (incoming.get(edge.toNodeId) ?? 0) + 1);
+    outgoing.get(edge.fromNodeId)?.push(edge.toNodeId);
+  }
+  const queue = workflow.nodes.filter((node) => (incoming.get(node.nodeId) ?? 0) === 0);
+  const result: WorkflowNode[] = [];
+  while (queue.length > 0) {
+    const node = queue.shift()!;
+    result.push(node);
+    for (const nextId of outgoing.get(node.nodeId) ?? []) {
+      const nextIncoming = (incoming.get(nextId) ?? 1) - 1;
+      incoming.set(nextId, nextIncoming);
+      if (nextIncoming === 0) {
+        const next = nodeById.get(nextId);
+        if (next) queue.push(next);
+      }
+    }
+  }
+  return result.length === workflow.nodes.length ? result : workflow.nodes;
+}
+
+function WorkflowOverview({
+  workflow,
+  run,
+  selectedNodeId,
+  onSelectNode,
+  selectedEdgeId,
+  onSelectEdge,
+  connectFromNodeId,
+  onHandleClick,
+  onCancelConnect,
+}: {
+  workflow: AgentClusterWorkflow;
+  run?: AgentClusterRun | null;
+  selectedNodeId?: string | null;
+  onSelectNode?: (nodeId: string) => void;
+  selectedEdgeId?: string | null;
+  onSelectEdge?: (edgeId: string) => void;
+  connectFromNodeId?: string | null;
+  onHandleClick?: (nodeId: string) => void;
+  onCancelConnect?: () => void;
+}) {
+  const orderedNodes = getWorkflowNodeOrder(workflow);
+  const agents = orderedNodes.filter((node) => node.type === 'agent' || node.type === 'review' || node.type === 'reduce');
+  const nodeRunById = new Map((run?.nodeRuns ?? []).map((nodeRun) => [nodeRun.nodeId, nodeRun]));
+  const incoming = new Map<string, WorkflowEdge[]>();
+  const outgoing = new Map<string, WorkflowEdge[]>();
+  for (const edge of workflow.edges) {
+    incoming.set(edge.toNodeId, [...(incoming.get(edge.toNodeId) ?? []), edge]);
+    outgoing.set(edge.fromNodeId, [...(outgoing.get(edge.fromNodeId) ?? []), edge]);
+  }
+
+  const nodeWidth = 200;
+  const nodeHeight = 106;
+  const xStep = 300;
+  const baseY = 250;
+  const canvasWidth = Math.max(860, agents.length * xStep + 220);
+  const canvasHeight = 520;
+  const positions = new Map<string, { x: number; y: number; width: number; height: number }>();
+
+  agents.forEach((node, index) => {
+    positions.set(node.nodeId, { x: 80 + index * xStep, y: baseY, width: nodeWidth, height: nodeHeight });
+  });
+
+  const placeBetween = (node: WorkflowNode, width: number, height: number, yOffset = 38) => {
+    const from = (incoming.get(node.nodeId) ?? []).map((edge) => positions.get(edge.fromNodeId)).find(Boolean);
+    const to = (outgoing.get(node.nodeId) ?? []).map((edge) => positions.get(edge.toNodeId)).find(Boolean);
+    if (!from || !to) return false;
+    const fromCenter = from.x + from.width / 2;
+    const toCenter = to.x + to.width / 2;
+    positions.set(node.nodeId, {
+      x: (fromCenter + toCenter) / 2 - width / 2,
+      y: Math.min(from.y, to.y) + yOffset,
+      width,
+      height,
+    });
+    return true;
+  };
+
+  const floatingOperators = orderedNodes.filter((node) => node.type !== 'agent' && node.type !== 'review' && node.type !== 'reduce');
+  floatingOperators.forEach((node, index) => {
+    if (node.type === 'gate' && placeBetween(node, 86, 30, 36)) return;
+    if (node.type === 'fan_out') {
+      const branchPositions = (outgoing.get(node.nodeId) ?? [])
+        .map((edge) => positions.get(edge.toNodeId))
+        .filter((position): position is { x: number; y: number; width: number; height: number } => Boolean(position));
+      if (branchPositions.length > 0) {
+        const minX = Math.min(...branchPositions.map((position) => position.x));
+        const maxX = Math.max(...branchPositions.map((position) => position.x + position.width));
+        positions.set(node.nodeId, { x: minX + (maxX - minX) / 2 - 48, y: baseY - 88, width: 96, height: 32 });
+        return;
+      }
+    }
+    if (node.type === 'join') {
+      const sourcePositions = (incoming.get(node.nodeId) ?? [])
+        .map((edge) => positions.get(edge.fromNodeId))
+        .filter((position): position is { x: number; y: number; width: number; height: number } => Boolean(position));
+      if (sourcePositions.length > 0) {
+        const minX = Math.min(...sourcePositions.map((position) => position.x));
+        const maxX = Math.max(...sourcePositions.map((position) => position.x + position.width));
+        positions.set(node.nodeId, { x: minX + (maxX - minX) / 2 - 48, y: baseY + 150, width: 96, height: 32 });
+        return;
+      }
+    }
+    if (node.type === 'loop') {
+      const loopBody = new Set(node.bodyNodeIds);
+      const loopPositions = agents
+        .filter((agent) => loopBody.has(agent.nodeId))
+        .map((agent) => positions.get(agent.nodeId))
+        .filter((position): position is { x: number; y: number; width: number; height: number } => Boolean(position));
+      if (loopPositions.length > 0) {
+        const minX = Math.min(...loopPositions.map((position) => position.x));
+        const maxX = Math.max(...loopPositions.map((position) => position.x + position.width));
+        positions.set(node.nodeId, { x: minX + (maxX - minX) / 2 - 48, y: baseY - 34, width: 96, height: 30 });
+        return;
+      }
+    }
+    positions.set(node.nodeId, {
+      x: 80 + (index % 4) * 150,
+      y: baseY + 180 + Math.floor(index / 4) * 58,
+      width: 112,
+      height: 32,
+    });
+  });
+
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [nodeOffsets, setNodeOffsets] = useState<Record<string, { x: number; y: number }>>({});
+  const [pointerPosition, setPointerPosition] = useState<{ x: number; y: number } | null>(null);
+  const [dragState, setDragState] = useState<
+    | {
+      type: 'node';
+      nodeId: string;
+      startX: number;
+      startY: number;
+      startOffsetX: number;
+      startOffsetY: number;
+    }
+    | {
+      type: 'pan';
+      startX: number;
+      startY: number;
+      startPanX: number;
+      startPanY: number;
+    }
+    | null
+  >(null);
+
+  for (const [nodeId, offset] of Object.entries(nodeOffsets)) {
+    const position = positions.get(nodeId);
+    if (position) positions.set(nodeId, { ...position, x: position.x + offset.x, y: position.y + offset.y });
+  }
+
+  const managerPosition = { x: canvasWidth / 2 - 110, y: 24, width: 220, height: 76 };
+  const getCenter = (nodeId: string) => {
+    const position = positions.get(nodeId);
+    if (!position) return null;
+    return { x: position.x + position.width / 2, y: position.y + position.height / 2 };
+  };
+  const edgePath = (edge: WorkflowEdge) => {
+    const from = getCenter(edge.fromNodeId);
+    const to = getCenter(edge.toNodeId);
+    if (!from || !to) return '';
+    if (from.x > to.x) {
+      const drop = Math.max(92, Math.abs(from.x - to.x) / 3);
+      return `M ${from.x} ${from.y} C ${from.x + 60} ${from.y + drop}, ${to.x - 60} ${to.y + drop}, ${to.x} ${to.y}`;
+    }
+    const midX = (from.x + to.x) / 2;
+    return `M ${from.x} ${from.y} C ${midX} ${from.y}, ${midX} ${to.y}, ${to.x} ${to.y}`;
+  };
+
+  const firstEntry = agents.find((node) => (incoming.get(node.nodeId) ?? []).length === 0) ?? agents[0];
+  const lastTerminal = [...agents].reverse().find((node) => (outgoing.get(node.nodeId) ?? []).length === 0) ?? agents[agents.length - 1];
+
+  const toCanvasPoint = (clientX: number, clientY: number) => {
+    const rect = viewportRef.current?.getBoundingClientRect();
+    if (!rect) return null;
+    return {
+      x: (clientX - rect.left - pan.x) / scale,
+      y: (clientY - rect.top - pan.y) / scale,
+    };
+  };
+
+  const handleWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const rect = viewportRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    if (event.ctrlKey || event.metaKey) {
+      const viewportX = event.clientX - rect.left;
+      const viewportY = event.clientY - rect.top;
+      const nextScale = Math.min(1.8, Math.max(0.55, Number((scale * Math.exp(-event.deltaY * 0.002)).toFixed(3))));
+      if (nextScale === scale) return;
+
+      const anchorX = (viewportX - pan.x) / scale;
+      const anchorY = (viewportY - pan.y) / scale;
+      setScale(nextScale);
+      setPan({
+        x: viewportX - anchorX * nextScale,
+        y: viewportY - anchorY * nextScale,
+      });
+      return;
+    }
+
+    setPan((value) => ({
+      x: value.x - event.deltaX,
+      y: value.y - event.deltaY,
+    }));
+  };
+
+  useEffect(() => {
+    if (!dragState) return;
+    const onPointerMove = (event: PointerEvent) => {
+      const deltaX = (event.clientX - dragState.startX) / scale;
+      const deltaY = (event.clientY - dragState.startY) / scale;
+      if (dragState.type === 'node') {
+        setNodeOffsets((value) => ({
+          ...value,
+          [dragState.nodeId]: {
+            x: dragState.startOffsetX + deltaX,
+            y: dragState.startOffsetY + deltaY,
+          },
+        }));
+      } else {
+        setPan({
+          x: dragState.startPanX + event.clientX - dragState.startX,
+          y: dragState.startPanY + event.clientY - dragState.startY,
+        });
+      }
+    };
+    const onPointerUp = () => setDragState(null);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp, { once: true });
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+    };
+  }, [dragState, scale]);
+
+  const renderAgent = (node: WorkflowNode) => {
+    const nodeRun = nodeRunById.get(node.nodeId);
+    const selectable = Boolean(onSelectNode);
+    const selected = selectedNodeId === node.nodeId;
+    const position = positions.get(node.nodeId);
+    if (!position) return null;
+    const handles = ['top', 'right', 'bottom', 'left'] as const;
+    return (
+      <div
+        key={node.nodeId}
+        data-testid={`workflow-agent-node-${node.nodeId}`}
+        className="absolute"
+        style={{ left: position.x, top: position.y, width: position.width, height: position.height }}
+      >
+        <button
+          type="button"
+          onPointerDown={(event) => {
+            if (!onHandleClick) return;
+            event.stopPropagation();
+            const offset = nodeOffsets[node.nodeId] ?? { x: 0, y: 0 };
+            setDragState({
+              type: 'node',
+              nodeId: node.nodeId,
+              startX: event.clientX,
+              startY: event.clientY,
+              startOffsetX: offset.x,
+              startOffsetY: offset.y,
+            });
+          }}
+          onClick={() => onSelectNode?.(node.nodeId)}
+          className={cn(
+            'h-full w-full rounded-xl border border-border/80 bg-card px-3 py-3 text-left shadow-sm transition-shadow',
+            selectable ? 'cursor-pointer hover:shadow-md' : 'cursor-default',
+            selected && 'ring-2 ring-foreground/20',
+            connectFromNodeId === node.nodeId && 'ring-2 ring-foreground',
+          )}
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <div className="line-clamp-2 break-words text-sm font-semibold [overflow-wrap:anywhere]">{node.name}</div>
+              <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+                {node.type === 'review' ? 'Review Agent' : node.type === 'reduce' ? 'Reduce Agent' : 'Agent'}
+              </div>
+            </div>
+            {nodeRun && <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-foreground/50" title={nodeRun.status} />}
+          </div>
+          {node.description && <div className="mt-2 line-clamp-2 break-words text-xs leading-5 text-muted-foreground [overflow-wrap:anywhere]">{node.description}</div>}
+        </button>
+        {onHandleClick && handles.map((handle) => (
+          <button
+            type="button"
+            key={handle}
+            aria-label={`${node.name} ${handle} 触点`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onHandleClick(node.nodeId);
+            }}
+            className={cn(
+              'absolute h-3 w-3 rounded-full border border-border bg-background shadow-sm transition-transform hover:scale-125',
+              handle === 'top' && 'left-1/2 top-0 -translate-x-1/2 -translate-y-1/2',
+              handle === 'right' && 'right-0 top-1/2 -translate-y-1/2 translate-x-1/2',
+              handle === 'bottom' && 'bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2',
+              handle === 'left' && 'left-0 top-1/2 -translate-x-1/2 -translate-y-1/2',
+            )}
+          />
+        ))}
+      </div>
+    );
+  };
+
+  const renderOperator = (node: WorkflowNode) => {
+    const position = positions.get(node.nodeId);
+    if (!position) return null;
+    const selected = selectedNodeId === node.nodeId;
+    const handles = ['top', 'right', 'bottom', 'left'] as const;
+    return (
+      <div
+        key={node.nodeId}
+        className="absolute"
+        style={{ left: position.x, top: position.y, width: position.width, height: position.height }}
+      >
+        <button
+          type="button"
+          data-testid={`workflow-operator-node-${node.nodeId}`}
+          onPointerDown={(event) => {
+            if (!onHandleClick) return;
+            event.stopPropagation();
+            const offset = nodeOffsets[node.nodeId] ?? { x: 0, y: 0 };
+            setDragState({
+              type: 'node',
+              nodeId: node.nodeId,
+              startX: event.clientX,
+              startY: event.clientY,
+              startOffsetX: offset.x,
+              startOffsetY: offset.y,
+            });
+          }}
+          onClick={() => onSelectNode?.(node.nodeId)}
+          className={cn(
+            'h-full w-full rounded-lg border border-border/80 bg-background px-2 text-center text-[10px] font-medium text-muted-foreground shadow-sm transition-shadow hover:shadow-md',
+            selected && 'ring-2 ring-foreground/20',
+            connectFromNodeId === node.nodeId && 'ring-2 ring-foreground',
+          )}
+          style={{ lineHeight: `${position.height}px` }}
+          title={node.description || node.name}
+        >
+          {node.type === 'gate' ? 'Gate' : workflowNodeLabels[node.type]}
+        </button>
+        {onHandleClick && handles.map((handle) => (
+          <button
+            type="button"
+            key={handle}
+            aria-label={`${node.name} ${handle} 触点`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onHandleClick(node.nodeId);
+            }}
+            className={cn(
+              'absolute h-2.5 w-2.5 rounded-full border border-border bg-background shadow-sm transition-transform hover:scale-125',
+              handle === 'top' && 'left-1/2 top-0 -translate-x-1/2 -translate-y-1/2',
+              handle === 'right' && 'right-0 top-1/2 -translate-y-1/2 translate-x-1/2',
+              handle === 'bottom' && 'bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2',
+              handle === 'left' && 'left-0 top-1/2 -translate-x-1/2 -translate-y-1/2',
+            )}
+          />
+        ))}
+      </div>
+    );
+  };
+
+  if (agents.length === 0) {
+    return <div className="mt-4 min-h-[520px] rounded-lg border border-dashed p-5 text-sm text-muted-foreground">Workflow 尚未包含 Agent 节点。</div>;
+  }
+
+  return (
+    <div
+      ref={viewportRef}
+      data-testid="agent-cluster-workflow-overview"
+      className={cn(
+        'mt-4 h-[520px] overflow-hidden rounded-xl border border-border/70 bg-background/55 p-3',
+        onHandleClick && (dragState?.type === 'pan' ? 'cursor-grabbing' : 'cursor-grab'),
+      )}
+      onWheel={handleWheel}
+      onPointerMove={(event) => {
+        if (!connectFromNodeId) return;
+        setPointerPosition(toCanvasPoint(event.clientX, event.clientY));
+      }}
+    >
+      <div
+        className="relative"
+        style={{
+          width: canvasWidth,
+          height: canvasHeight,
+          transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`,
+          transformOrigin: '0 0',
+        }}
+        onPointerDown={(event) => {
+          if (!onHandleClick || event.target !== event.currentTarget) return;
+          setDragState({
+            type: 'pan',
+            startX: event.clientX,
+            startY: event.clientY,
+            startPanX: pan.x,
+            startPanY: pan.y,
+          });
+        }}
+        onClick={(event) => {
+          if (event.target !== event.currentTarget) return;
+          setPointerPosition(null);
+          onCancelConnect?.();
+        }}
+      >
+        <svg className="pointer-events-none absolute inset-0" width={canvasWidth} height={canvasHeight} aria-hidden="true">
+          <defs>
+            <marker id="workflow-arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto" markerUnits="strokeWidth">
+              <path d="M 0 0 L 8 4 L 0 8 z" className="fill-muted-foreground" />
+            </marker>
+          </defs>
+          {firstEntry && (() => {
+            const to = getCenter(firstEntry.nodeId);
+            if (!to) return null;
+            const from = { x: managerPosition.x + managerPosition.width / 2, y: managerPosition.y + managerPosition.height };
+            return <path d={`M ${from.x} ${from.y} C ${from.x} ${from.y + 54}, ${to.x} ${to.y - 72}, ${to.x} ${to.y - 4}`} className="fill-none stroke-border" strokeWidth="1.5" strokeDasharray="4 4" markerEnd="url(#workflow-arrow)" />;
+          })()}
+          {lastTerminal && (() => {
+            const from = getCenter(lastTerminal.nodeId);
+            if (!from) return null;
+            const to = { x: managerPosition.x + managerPosition.width / 2, y: managerPosition.y + managerPosition.height / 2 };
+            return <path d={`M ${from.x} ${from.y - 42} C ${from.x} ${managerPosition.y - 12}, ${to.x} ${managerPosition.y - 12}, ${to.x} ${to.y}`} className="fill-none stroke-border" strokeWidth="1.2" strokeDasharray="3 5" />;
+          })()}
+        </svg>
+
+        {(workflow.nodes.filter((node) => node.type === 'loop') as Extract<WorkflowNode, { type: 'loop' }>[]).map((loop) => {
+          const loopPositions = loop.bodyNodeIds
+            .map((nodeId) => positions.get(nodeId))
+            .filter((position): position is { x: number; y: number; width: number; height: number } => Boolean(position));
+          if (loopPositions.length === 0) return null;
+          const minX = Math.min(...loopPositions.map((position) => position.x));
+          const maxX = Math.max(...loopPositions.map((position) => position.x + position.width));
+          const minY = Math.min(...loopPositions.map((position) => position.y));
+          const maxY = Math.max(...loopPositions.map((position) => position.y + position.height));
+          return (
+            <button
+              key={loop.nodeId}
+              type="button"
+              data-testid="workflow-loop-group"
+              onClick={() => onSelectNode?.(loop.nodeId)}
+              className={cn(
+                'absolute rounded-2xl border border-dashed border-foreground/25 bg-card/20 text-left',
+                selectedNodeId === loop.nodeId && 'ring-2 ring-foreground/20',
+              )}
+              style={{ left: minX - 24, top: minY - 56, width: maxX - minX + 48, height: maxY - minY + 88 }}
+            >
+              <span className="absolute left-4 top-2 rounded-full bg-background px-2 py-1 text-[10px] font-medium text-muted-foreground">
+                Loop × {loop.repeatCount}
+              </span>
+            </button>
+          );
+        })}
+
+        {(workflow.nodes.filter((node) => node.type === 'fan_out') as Extract<WorkflowNode, { type: 'fan_out' }>[]).map((fanOut) => {
+          const branchPositions = (outgoing.get(fanOut.nodeId) ?? [])
+            .map((edge) => positions.get(edge.toNodeId))
+            .filter((position): position is { x: number; y: number; width: number; height: number } => Boolean(position));
+          if (branchPositions.length === 0) return null;
+          const minX = Math.min(...branchPositions.map((position) => position.x));
+          const maxX = Math.max(...branchPositions.map((position) => position.x + position.width));
+          const minY = Math.min(...branchPositions.map((position) => position.y));
+          const maxY = Math.max(...branchPositions.map((position) => position.y + position.height));
+          return (
+            <button
+              key={fanOut.nodeId}
+              type="button"
+              data-testid="workflow-fanout-group"
+              onClick={() => onSelectNode?.(fanOut.nodeId)}
+              className={cn(
+                'absolute rounded-2xl border border-dashed border-border bg-card/10 text-left',
+                selectedNodeId === fanOut.nodeId && 'ring-2 ring-foreground/20',
+              )}
+              style={{ left: minX - 18, top: minY - 44, width: maxX - minX + 36, height: maxY - minY + 68 }}
+            >
+              <span className="absolute left-4 top-2 rounded-full bg-background px-2 py-1 text-[10px] font-medium text-muted-foreground">
+                Fan-out · 并发 {fanOut.concurrency}
+              </span>
+            </button>
+          );
+        })}
+
+        <svg className="absolute inset-0" width={canvasWidth} height={canvasHeight}>
+          <defs>
+            <marker id="workflow-arrow-interactive" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto" markerUnits="strokeWidth">
+              <path d="M 0 0 L 8 4 L 0 8 z" className="fill-muted-foreground" />
+            </marker>
+          </defs>
+          {workflow.edges.map((edge) => {
+            const path = edgePath(edge);
+            const from = getCenter(edge.fromNodeId);
+            const to = getCenter(edge.toNodeId);
+            if (!path || !from || !to) return null;
+            const selected = selectedEdgeId === edge.edgeId;
+            return (
+              <g key={edge.edgeId}>
+                <path
+                  d={path}
+                  className="fill-none stroke-transparent"
+                  strokeWidth="14"
+                  onClick={() => onSelectEdge?.(edge.edgeId)}
+                  role={onSelectEdge ? 'button' : undefined}
+                />
+                <path
+                  d={path}
+                  className={cn('pointer-events-none fill-none', selected ? 'stroke-foreground' : 'stroke-muted-foreground/55')}
+                  strokeWidth={selected ? 2.4 : 1.6}
+                  strokeDasharray={edge.kind === 'data' || from.x > to.x ? '5 5' : undefined}
+                  markerEnd="url(#workflow-arrow-interactive)"
+                />
+              </g>
+            );
+          })}
+          {connectFromNodeId && pointerPosition && (() => {
+            const from = getCenter(connectFromNodeId);
+            if (!from) return null;
+            const midX = (from.x + pointerPosition.x) / 2;
+            return (
+              <path
+                d={`M ${from.x} ${from.y} C ${midX} ${from.y}, ${midX} ${pointerPosition.y}, ${pointerPosition.x} ${pointerPosition.y}`}
+                className="pointer-events-none fill-none stroke-foreground/70"
+                strokeWidth="1.8"
+                strokeDasharray="5 5"
+              />
+            );
+          })()}
+        </svg>
+
+        <div
+          className="absolute rounded-2xl border border-border/80 bg-card px-4 py-3 text-center shadow-sm"
+          style={{ left: managerPosition.x, top: managerPosition.y, width: managerPosition.width, height: managerPosition.height }}
+        >
+          <div className="text-sm font-semibold">Cluster Manager</div>
+          <div className="mt-1 text-[11px] leading-4 text-muted-foreground">提案、总控与结果汇总</div>
+        </div>
+
+        {agents.map(renderAgent)}
+        {floatingOperators.filter((node) => node.type !== 'loop').map(renderOperator)}
+      </div>
+    </div>
+  );
+}
+
+function WorkflowEditor({
+  workflow,
+  run,
+  editing,
+  onChange,
+  onManualCreateAgent,
+  onAiCreateAgent,
+}: {
+  workflow: AgentClusterWorkflow;
+  run?: AgentClusterRun | null;
+  editing: boolean;
+  onChange: (workflow: AgentClusterWorkflow) => void;
+  onManualCreateAgent: (input: CreateAgentClusterAgentRequest) => Promise<void>;
+  onAiCreateAgent: (prompt: string) => Promise<void>;
+}) {
+  const [selectedNodeId, setSelectedNodeId] = useState(workflow.nodes[0]?.nodeId ?? '');
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [connectFromNodeId, setConnectFromNodeId] = useState<string | null>(null);
+  const [addAgentMode, setAddAgentMode] = useState<'closed' | 'ai' | 'manual'>('closed');
+  const [aiAgentPrompt, setAiAgentPrompt] = useState('');
+  const [manualAgentDraft, setManualAgentDraft] = useState<CreateAgentClusterAgentRequest>({
+    name: '',
+    role: '',
+    description: '',
+    systemPrompt: '',
+    tools: [],
+    capabilities: [],
+  });
+  const [addingAgent, setAddingAgent] = useState(false);
+  const selectedNode = workflow.nodes.find((node) => node.nodeId === selectedNodeId) ?? workflow.nodes[0] ?? null;
+  const selectedEdge = workflow.edges.find((edge) => edge.edgeId === selectedEdgeId) ?? null;
+  const operatorDescriptions: Record<Exclude<WorkflowNodeType, 'agent' | 'review' | 'reduce'>, string> = {
+    fan_out: '并行展开多个分支',
+    join: '等待并汇合分支结果',
+    gate: '用代码检查完成、产物或数量',
+    loop: '框住子链并重复执行',
+    human_gate: '暂停等待用户确认',
+  };
+
+  const appendNodesAndEdges = (nodes: WorkflowNode[], edges: WorkflowEdge[] = []) => {
+    onChange({
+      ...workflow,
+      status: 'draft',
+      nodes: [...workflow.nodes, ...nodes],
+      edges: [...workflow.edges, ...edges],
+    });
+  };
+
+  const updateNode = (nodeId: string, patch: Partial<WorkflowNode>) => {
+    onChange({
+      ...workflow,
+      status: 'draft',
+      nodes: workflow.nodes.map((node) => node.nodeId === nodeId ? { ...node, ...patch } as WorkflowNode : node),
+    });
+  };
+
+  const addOperator = (type: Exclude<WorkflowNodeType, 'agent' | 'review' | 'reduce'>) => {
+    const nodeId = `${type}:${crypto.randomUUID()}`;
+    const base = { nodeId, type, name: workflowNodeLabels[type] };
+    const node: WorkflowNode = type === 'join'
+        ? { ...base, type, mode: 'all' }
+        : type === 'gate'
+          ? { ...base, type, gateKind: 'completion' }
+          : type === 'fan_out'
+            ? { ...base, type, concurrency: Math.min(4, workflow.policy.maxConcurrency) }
+            : type === 'loop'
+              ? { ...base, type, bodyNodeIds: [], repeatCount: 2 }
+              : { ...base, type, prompt: '请确认是否继续执行后续节点。' };
+    setSelectedNodeId(nodeId);
+    setSelectedEdgeId(null);
+    if (type === 'fan_out') {
+      const joinId = `join:${crypto.randomUUID()}`;
+      appendNodesAndEdges([node, { nodeId: joinId, type: 'join', name: 'Join', mode: 'all' }]);
+      return;
+    }
+    appendNodesAndEdges([node]);
+  };
+
+  const addEdgeBetween = (fromNodeId: string, toNodeId: string) => {
+    if (!fromNodeId || !toNodeId || fromNodeId === toNodeId) return;
+    if (workflow.edges.some((edge) => edge.kind === 'control' && edge.fromNodeId === fromNodeId && edge.toNodeId === toNodeId)) return;
+    const edge: WorkflowEdge = {
+      edgeId: crypto.randomUUID(),
+      fromNodeId,
+      toNodeId,
+      kind: 'control',
+    };
+    onChange({ ...workflow, status: 'draft', edges: [...workflow.edges, edge] });
+    setSelectedEdgeId(edge.edgeId);
+  };
+
+  const handleCanvasHandleClick = (nodeId: string) => {
+    if (!connectFromNodeId) {
+      setConnectFromNodeId(nodeId);
+      setSelectedNodeId(nodeId);
+      setSelectedEdgeId(null);
+      return;
+    }
+    if (connectFromNodeId === nodeId) {
+      setConnectFromNodeId(null);
+      return;
+    }
+    addEdgeBetween(connectFromNodeId, nodeId);
+    setConnectFromNodeId(null);
+  };
+
+  const updateEdge = (edgeId: string, patch: Partial<WorkflowEdge>) => {
+    onChange({
+      ...workflow,
+      status: 'draft',
+      edges: workflow.edges.map((edge) => edge.edgeId === edgeId ? { ...edge, ...patch } : edge),
+    });
+  };
+
+  const deleteEdge = (edgeId: string) => {
+    setSelectedEdgeId(null);
+    onChange({ ...workflow, status: 'draft', edges: workflow.edges.filter((edge) => edge.edgeId !== edgeId) });
+  };
+
+  const insertOperatorOnEdge = (edge: WorkflowEdge, type: Exclude<WorkflowNodeType, 'agent' | 'review' | 'reduce' | 'join'>) => {
+    const nodeId = `${type}:${crypto.randomUUID()}`;
+    const base = { nodeId, type, name: workflowNodeLabels[type] };
+    const operator: WorkflowNode = type === 'gate'
+      ? { ...base, type, gateKind: 'completion' }
+      : type === 'fan_out'
+        ? { ...base, type, concurrency: Math.min(4, workflow.policy.maxConcurrency) }
+        : type === 'loop'
+          ? { ...base, type, bodyNodeIds: [edge.toNodeId], repeatCount: 2 }
+          : { ...base, type, prompt: '请确认是否继续执行后续节点。' };
+    const nextEdges: WorkflowEdge[] = [
+      { edgeId: crypto.randomUUID(), fromNodeId: edge.fromNodeId, toNodeId: nodeId, kind: edge.kind },
+      { edgeId: crypto.randomUUID(), fromNodeId: nodeId, toNodeId: edge.toNodeId, kind: edge.kind },
+    ];
+    const nextNodes: WorkflowNode[] = [operator];
+    if (type === 'fan_out') {
+      const joinId = `join:${crypto.randomUUID()}`;
+      nextNodes.push({ nodeId: joinId, type: 'join', name: 'Join', mode: 'all' });
+      nextEdges.push({ edgeId: crypto.randomUUID(), fromNodeId: edge.toNodeId, toNodeId: joinId, kind: edge.kind });
+    }
+    setSelectedNodeId(nodeId);
+    setSelectedEdgeId(null);
+    onChange({
+      ...workflow,
+      status: 'draft',
+      nodes: [...workflow.nodes, ...nextNodes],
+      edges: [...workflow.edges.filter((item) => item.edgeId !== edge.edgeId), ...nextEdges],
+    });
+  };
+
+  const removeNode = (nodeId: string) => {
+    const node = workflow.nodes.find((item) => item.nodeId === nodeId);
+    if (!node || node.type === 'agent' || node.type === 'review' || node.type === 'reduce') return;
+    const nextNodes = workflow.nodes.filter((item) => item.nodeId !== nodeId);
+    setSelectedNodeId(nextNodes[0]?.nodeId ?? '');
+    onChange({
+      ...workflow,
+      status: 'draft',
+      nodes: nextNodes,
+      edges: workflow.edges.filter((edge) => edge.fromNodeId !== nodeId && edge.toNodeId !== nodeId),
+    });
+  };
+
+  useEffect(() => {
+    if (!connectFromNodeId && !selectedEdgeId) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setConnectFromNodeId(null);
+      setSelectedEdgeId(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [connectFromNodeId, selectedEdgeId]);
+
+  const submitAiAgent = async () => {
+    const prompt = aiAgentPrompt.trim();
+    if (!prompt) return;
+    setAddingAgent(true);
+    try {
+      await onAiCreateAgent(`请为当前集群新增一个子 Agent，并给出推荐连线/Workflow 修改提案：${prompt}`);
+      setAiAgentPrompt('');
+      setAddAgentMode('closed');
+    } finally {
+      setAddingAgent(false);
+    }
+  };
+
+  const submitManualAgent = async () => {
+    const name = manualAgentDraft.name.trim();
+    const role = manualAgentDraft.role.trim();
+    if (!name || !role) return;
+    setAddingAgent(true);
+    try {
+      await onManualCreateAgent({
+        ...manualAgentDraft,
+        name,
+        role,
+        description: manualAgentDraft.description?.trim(),
+        systemPrompt: manualAgentDraft.systemPrompt?.trim(),
+      });
+      setManualAgentDraft({
+        name: '',
+        role: '',
+        description: '',
+        systemPrompt: '',
+        tools: [],
+        capabilities: [],
+      });
+      setAddAgentMode('closed');
+    } finally {
+      setAddingAgent(false);
+    }
+  };
+
+  return (
+    <section data-testid="agent-cluster-workflow-editor" className="soft-panel rounded-xl p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <Network className="h-4 w-4 text-muted-foreground" />
+            <h2 className="text-sm font-semibold">Harness Workflow v{workflow.version}</h2>
+            <Badge variant={workflow.status === 'confirmed' ? 'secondary' : 'outline'}>{workflow.status === 'confirmed' ? '已确认' : '草稿'}</Badge>
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">模型负责节点任务；Harness 负责并行、汇合、门禁、重试与恢复。</p>
+        </div>
+        <Badge variant="outline">最大并发 {workflow.policy.maxConcurrency}</Badge>
+      </div>
+
+      {editing ? (
+        <div className="mt-4 grid gap-4 xl:grid-cols-[180px_minmax(0,1fr)_280px]">
+          <aside className="soft-row rounded-xl p-3">
+            <div className="text-xs font-semibold">组件库</div>
+            <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
+              点击添加 Harness 算子；新增业务 Agent 建议通过 Cluster Manager 提案生成。
+            </p>
+            <div className="mt-3 space-y-2">
+              <div className="rounded-lg border border-dashed border-border/80 p-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <div className="text-xs font-medium">添加子 Agent</div>
+                    <div className="mt-0.5 text-[11px] text-muted-foreground">AI 提案或手动创建</div>
+                  </div>
+                  <Plus className="h-4 w-4 text-muted-foreground" />
+                </div>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <Button type="button" variant="outline" size="sm" className="h-8 text-xs" onClick={() => setAddAgentMode(addAgentMode === 'ai' ? 'closed' : 'ai')}>
+                    AI 生成
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" className="h-8 text-xs" onClick={() => setAddAgentMode(addAgentMode === 'manual' ? 'closed' : 'manual')}>
+                    手动创建
+                  </Button>
+                </div>
+                {addAgentMode === 'ai' && (
+                  <div className="mt-2 space-y-2">
+                    <Textarea
+                      className="min-h-20 resize-y text-xs"
+                      value={aiAgentPrompt}
+                      onChange={(event) => setAiAgentPrompt(event.target.value)}
+                      placeholder="描述新 Agent 的职责、输入和输出，例如：新增一个审查因子重复度的 Agent。"
+                    />
+                    <Button type="button" size="sm" className="h-8 w-full text-xs" disabled={!aiAgentPrompt.trim() || addingAgent} onClick={() => void submitAiAgent()}>
+                      {addingAgent && <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />}
+                      生成提案
+                    </Button>
+                  </div>
+                )}
+                {addAgentMode === 'manual' && (
+                  <div className="mt-2 space-y-2">
+                    <Input
+                      className="h-8 text-xs"
+                      value={manualAgentDraft.name}
+                      onChange={(event) => setManualAgentDraft((value) => ({ ...value, name: event.target.value }))}
+                      placeholder="Agent 名称"
+                    />
+                    <Input
+                      className="h-8 text-xs"
+                      value={manualAgentDraft.role}
+                      onChange={(event) => setManualAgentDraft((value) => ({ ...value, role: event.target.value }))}
+                      placeholder="角色"
+                    />
+                    <Textarea
+                      className="min-h-16 resize-y text-xs"
+                      value={manualAgentDraft.description}
+                      onChange={(event) => setManualAgentDraft((value) => ({ ...value, description: event.target.value }))}
+                      placeholder="职责描述"
+                    />
+                    <Textarea
+                      className="min-h-20 resize-y text-xs"
+                      value={manualAgentDraft.systemPrompt}
+                      onChange={(event) => setManualAgentDraft((value) => ({ ...value, systemPrompt: event.target.value }))}
+                      placeholder="可选：system prompt"
+                    />
+                    <Button type="button" size="sm" className="h-8 w-full text-xs" disabled={!manualAgentDraft.name.trim() || !manualAgentDraft.role.trim() || addingAgent} onClick={() => void submitManualAgent()}>
+                      {addingAgent && <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />}
+                      创建并生成草稿
+                    </Button>
+                  </div>
+                )}
+              </div>
+              {(['gate', 'loop', 'fan_out', 'join', 'human_gate'] as const).map((type) => (
+                <button
+                  key={type}
+                  type="button"
+                  className="w-full rounded-lg border border-border/80 bg-background px-3 py-2 text-left text-xs shadow-sm transition-shadow hover:shadow-md"
+                  onClick={() => addOperator(type)}
+                >
+                  <span className="font-medium">{workflowNodeLabels[type]}</span>
+                  <span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">{operatorDescriptions[type]}</span>
+                </button>
+              ))}
+            </div>
+          </aside>
+
+          <div className="min-w-0 rounded-xl border border-border/70 bg-card/45 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="text-xs font-semibold">流程画布</div>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  点击节点触点开始连线；点击连线后可在右侧插入 Gate、Fan-out、Loop 或 Human Gate。
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {connectFromNodeId && <Badge variant="secondary">正在连线：{workflow.nodes.find((node) => node.nodeId === connectFromNodeId)?.name ?? connectFromNodeId}</Badge>}
+                <Badge variant="outline">{workflow.nodes.length} 节点</Badge>
+              </div>
+            </div>
+            <WorkflowOverview
+              workflow={workflow}
+              run={run}
+              selectedNodeId={selectedNode?.nodeId}
+              onSelectNode={(nodeId) => {
+                setSelectedNodeId(nodeId);
+                setSelectedEdgeId(null);
+              }}
+              selectedEdgeId={selectedEdgeId}
+              onSelectEdge={(edgeId) => {
+                setSelectedEdgeId(edgeId);
+                setConnectFromNodeId(null);
+              }}
+              connectFromNodeId={connectFromNodeId}
+              onHandleClick={handleCanvasHandleClick}
+              onCancelConnect={() => setConnectFromNodeId(null)}
+            />
+          </div>
+
+          <aside className="soft-row rounded-xl p-3">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <div className="text-xs font-semibold">属性</div>
+                <div className="mt-1 text-[11px] text-muted-foreground">
+                  {selectedEdge ? '连接' : selectedNode ? workflowNodeLabels[selectedNode.type] : '未选择节点'}
+                </div>
+              </div>
+              {!selectedEdge && selectedNode && selectedNode.type !== 'agent' && selectedNode.type !== 'review' && selectedNode.type !== 'reduce' && (
+                <Button type="button" variant="ghost" size="icon" className="h-7 w-7" onClick={() => removeNode(selectedNode.nodeId)}>
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              )}
+            </div>
+
+            {selectedEdge ? (
+              <div className="mt-3 space-y-3">
+                <div className="rounded-lg border border-border/70 p-3 text-xs">
+                  <div className="font-medium">
+                    {workflow.nodes.find((node) => node.nodeId === selectedEdge.fromNodeId)?.name ?? selectedEdge.fromNodeId}
+                  </div>
+                  <ArrowRight className="my-2 h-4 w-4 text-muted-foreground" />
+                  <div className="font-medium">
+                    {workflow.nodes.find((node) => node.nodeId === selectedEdge.toNodeId)?.name ?? selectedEdge.toNodeId}
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[11px] font-medium text-muted-foreground">连接类型</label>
+                  <select
+                    className="mt-1 h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
+                    value={selectedEdge.kind}
+                    onChange={(event) => updateEdge(selectedEdge.edgeId, { kind: event.target.value as WorkflowEdge['kind'] })}
+                  >
+                    <option value="control">control · 控制顺序</option>
+                    <option value="data">data · 上下文/数据</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[11px] font-medium text-muted-foreground">连接标签</label>
+                  <Input className="mt-1 h-8 text-xs" value={selectedEdge.label ?? ''} onChange={(event) => updateEdge(selectedEdge.edgeId, { label: event.target.value || undefined })} />
+                </div>
+                <div className="space-y-2">
+                  <div className="text-[11px] font-medium text-muted-foreground">在线上插入算子</div>
+                  {(['gate', 'fan_out', 'loop', 'human_gate'] as const).map((type) => (
+                    <Button key={type} type="button" variant="outline" size="sm" className="h-8 w-full justify-start text-xs" onClick={() => insertOperatorOnEdge(selectedEdge, type)}>
+                      <Plus className="mr-2 h-3.5 w-3.5" />
+                      插入 {workflowNodeLabels[type]}
+                    </Button>
+                  ))}
+                </div>
+                <Button type="button" variant="outline" size="sm" className="w-full text-destructive" onClick={() => deleteEdge(selectedEdge.edgeId)}>
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  删除连接
+                </Button>
+              </div>
+            ) : selectedNode ? (
+              <div className="mt-3 space-y-3">
+                <div>
+                  <label className="text-[11px] font-medium text-muted-foreground">名称</label>
+                  <Input className="mt-1 h-8 text-xs" value={selectedNode.name} onChange={(event) => updateNode(selectedNode.nodeId, { name: event.target.value })} />
+                </div>
+                <div>
+                  <label className="text-[11px] font-medium text-muted-foreground">说明</label>
+                  <Textarea className="mt-1 min-h-20 resize-y text-xs" value={selectedNode.description ?? ''} onChange={(event) => updateNode(selectedNode.nodeId, { description: event.target.value })} />
+                </div>
+
+                {(selectedNode.type === 'agent' || selectedNode.type === 'review' || selectedNode.type === 'reduce') && (
+                  <div>
+                    <label className="text-[11px] font-medium text-muted-foreground">Agent 节点类型</label>
+                    <select
+                      className="mt-1 h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
+                      value={selectedNode.type}
+                      onChange={(event) => updateNode(selectedNode.nodeId, { type: event.target.value as 'agent' | 'review' | 'reduce' })}
+                    >
+                      <option value="agent">Agent</option>
+                      <option value="review">Review Agent</option>
+                      <option value="reduce">Reduce Agent</option>
+                    </select>
+                  </div>
+                )}
+
+                {selectedNode.type === 'fan_out' && (
+                  <div className="space-y-2">
+                    <div>
+                      <label className="text-[11px] font-medium text-muted-foreground">最大并发</label>
+                      <Input className="mt-1 h-8" type="number" min={1} max={16} value={selectedNode.concurrency} onChange={(event) => updateNode(selectedNode.nodeId, { concurrency: Number(event.target.value) } as Partial<WorkflowNode>)} />
+                    </div>
+                    <div className="space-y-1 rounded-md border border-border/70 p-2">
+                      <div className="mb-1 text-[11px] text-muted-foreground">并行分支</div>
+                      {workflow.nodes.filter((item) => item.type === 'agent' || item.type === 'review' || item.type === 'reduce').map((item) => {
+                        const checked = workflow.edges.some((edge) => edge.fromNodeId === selectedNode.nodeId && edge.toNodeId === item.nodeId);
+                        return (
+                          <label key={item.nodeId} className="flex items-center gap-2 text-xs">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={(event) => {
+                                if (event.target.checked) {
+                                  addEdgeBetween(selectedNode.nodeId, item.nodeId);
+                                } else {
+                                  onChange({
+                                    ...workflow,
+                                    status: 'draft',
+                                    edges: workflow.edges.filter((edge) => !(edge.fromNodeId === selectedNode.nodeId && edge.toNodeId === item.nodeId)),
+                                  });
+                                }
+                              }}
+                            />
+                            <span className="truncate">{item.name}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {selectedNode.type === 'join' && (
+                  <div className="space-y-2">
+                    <label className="text-[11px] font-medium text-muted-foreground">汇合策略</label>
+                    <select className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs" value={selectedNode.mode} onChange={(event) => updateNode(selectedNode.nodeId, { mode: event.target.value as 'all' | 'minimum' } as Partial<WorkflowNode>)}>
+                      <option value="all">等待全部成功</option>
+                      <option value="minimum">达到最少成功数</option>
+                    </select>
+                    {selectedNode.mode === 'minimum' && (
+                      <Input className="h-8" type="number" min={1} value={selectedNode.minimumSuccess ?? 1} onChange={(event) => updateNode(selectedNode.nodeId, { minimumSuccess: Number(event.target.value) } as Partial<WorkflowNode>)} />
+                    )}
+                  </div>
+                )}
+
+                {selectedNode.type === 'gate' && (
+                  <div className="space-y-2">
+                    <label className="text-[11px] font-medium text-muted-foreground">Gate 类型</label>
+                    <select className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs" value={selectedNode.gateKind} onChange={(event) => updateNode(selectedNode.nodeId, { gateKind: event.target.value as 'completion' | 'artifact' | 'count' | 'schema' } as Partial<WorkflowNode>)}>
+                      <option value="completion">完成状态</option>
+                      <option value="artifact">产物存在</option>
+                      <option value="count">数量门槛</option>
+                      <option value="schema">Schema 必填字段</option>
+                    </select>
+                    {selectedNode.gateKind === 'count' && (
+                      <Input className="h-8" type="number" min={1} value={selectedNode.minimumCount ?? 1} onChange={(event) => updateNode(selectedNode.nodeId, { minimumCount: Number(event.target.value) } as Partial<WorkflowNode>)} />
+                    )}
+                    {selectedNode.gateKind === 'artifact' && (
+                      <Input
+                        className="h-8"
+                        value={selectedNode.inputContract?.requiredArtifacts?.join(', ') ?? ''}
+                        placeholder="必需产物，逗号分隔"
+                        onChange={(event) => updateNode(selectedNode.nodeId, {
+                          inputContract: {
+                            ...selectedNode.inputContract,
+                            requiredArtifacts: event.target.value.split(',').map((item) => item.trim()).filter(Boolean),
+                          },
+                        })}
+                      />
+                    )}
+                    {selectedNode.gateKind === 'schema' && (
+                      <Input
+                        className="h-8"
+                        value={Array.isArray(selectedNode.inputContract?.schema?.required) ? selectedNode.inputContract?.schema?.required.join(', ') : ''}
+                        placeholder="必填输出字段，逗号分隔"
+                        onChange={(event) => updateNode(selectedNode.nodeId, {
+                          inputContract: {
+                            ...selectedNode.inputContract,
+                            schema: {
+                              type: 'object',
+                              required: event.target.value.split(',').map((item) => item.trim()).filter(Boolean),
+                            },
+                          },
+                        })}
+                      />
+                    )}
+                  </div>
+                )}
+
+                {selectedNode.type === 'loop' && (
+                  <div className="space-y-2">
+                    <label className="text-[11px] font-medium text-muted-foreground">重复次数</label>
+                    <Input className="h-8" type="number" min={1} max={20} value={selectedNode.repeatCount} onChange={(event) => updateNode(selectedNode.nodeId, { repeatCount: Number(event.target.value) } as Partial<WorkflowNode>)} />
+                    <div className="space-y-1 rounded-md border border-border/70 p-2">
+                      <div className="mb-1 text-[11px] text-muted-foreground">循环体节点</div>
+                      {workflow.nodes.filter((item) => item.type === 'agent' || item.type === 'review' || item.type === 'reduce').map((item) => (
+                        <label key={item.nodeId} className="flex items-center gap-2 text-xs">
+                          <input
+                            type="checkbox"
+                            checked={selectedNode.bodyNodeIds.includes(item.nodeId)}
+                            onChange={(event) => updateNode(selectedNode.nodeId, {
+                              bodyNodeIds: event.target.checked
+                                ? [...selectedNode.bodyNodeIds, item.nodeId]
+                                : selectedNode.bodyNodeIds.filter((nodeId) => nodeId !== item.nodeId),
+                            } as Partial<WorkflowNode>)}
+                          />
+                          <span className="truncate">{item.name}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {selectedNode.type === 'human_gate' && (
+                  <div>
+                    <label className="text-[11px] font-medium text-muted-foreground">用户确认提示</label>
+                    <Textarea className="mt-1 min-h-24 resize-y text-xs" value={selectedNode.prompt} onChange={(event) => updateNode(selectedNode.nodeId, { prompt: event.target.value } as Partial<WorkflowNode>)} />
+                  </div>
+                )}
+
+                {selectedNode.type === 'review' && (
+                  <div>
+                    <label className="text-[11px] font-medium text-muted-foreground">退回目标</label>
+                    <select
+                      className="mt-1 h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
+                      value={selectedNode.reviseTargetNodeId ?? ''}
+                      onChange={(event) => updateNode(selectedNode.nodeId, { reviseTargetNodeId: event.target.value || undefined })}
+                    >
+                      <option value="">仅给出审查结论</option>
+                      {workflow.nodes.filter((item) => item.nodeId !== selectedNode.nodeId && (item.type === 'agent' || item.type === 'reduce')).map((item) => (
+                        <option key={item.nodeId} value={item.nodeId}>退回：{item.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="mt-4 rounded-lg border border-dashed border-border/80 p-4 text-xs text-muted-foreground">
+                从画布中选择一个节点查看配置。
+              </div>
+            )}
+          </aside>
+        </div>
+      ) : (
+        <WorkflowOverview workflow={workflow} run={run} />
+      )}
+    </section>
+  );
 }
 
 function AgentClusterCreateModeCard({
@@ -936,19 +2104,26 @@ function AgentConversationPanel({
   const selectedBaseModel = useBaseModelStore((state) => state.selectedModel);
   const [input, setInput] = useState('');
 
-  const visibleMessages = selectedAgent
+  const visibleMessages = useMemo(() => (selectedAgent
     ? cluster.messages.filter((message) =>
         message.targetAgentId === selectedAgent.agentId
         || message.senderAgentId === selectedAgent.agentId
       )
-    : cluster.messages.filter((message) => message.targetType === 'cluster' && message.visibility === 'public');
-  const agentOutputs = selectedAgent?.localContext.outputs ?? [];
-  const visibleEvents = (cluster.events ?? []).filter((event) =>
-    selectedAgent ? event.agentId === selectedAgent.agentId : !event.agentId
-  ).slice(0, 80);
-  const pendingProposals = selectedAgent
+    : cluster.messages.filter((message) => message.targetType === 'cluster' && message.visibility === 'public')).slice(-40), [cluster.messages, selectedAgent]);
+  const agentOutputs = useMemo(() => (selectedAgent?.localContext.outputs ?? []).slice(-12), [selectedAgent?.localContext.outputs]);
+  const visibleEvents = useMemo(() => (cluster.events ?? [])
+    .filter((event) =>
+      event.display !== 'silent'
+      && event.title !== '子会话活动'
+      && event.content !== 'Agent 子会话正在运行'
+      && !(event.title === '子会话输出' && /^调用工具：/u.test(event.content.trim()))
+      && !(event.title === '工具事件' && /^(调用工具：|工具返回结果。)/u.test(event.content.trim()))
+      && (selectedAgent ? event.agentId === selectedAgent.agentId : !event.agentId)
+    )
+    .slice(0, 30), [cluster.events, selectedAgent]);
+  const pendingProposals = useMemo(() => (selectedAgent
     ? []
-    : (cluster.sharedContext.managerProposals ?? []).filter((proposal) => proposal.status === 'pending');
+    : (cluster.sharedContext.managerProposals ?? []).filter((proposal) => proposal.status === 'pending')), [cluster.sharedContext.managerProposals, selectedAgent]);
   const activeRun = cluster.runs?.find((run) => run.runId === cluster.activeRunId) ?? null;
   const selectedChildRun = selectedAgent && activeRun
     ? activeRun.childRuns.find((child) => child.agentId === selectedAgent.agentId) ?? null
@@ -970,7 +2145,7 @@ function AgentConversationPanel({
   };
 
   return (
-    <aside data-testid="agent-cluster-conversation" className="zone-cluster glass-shell flex h-full min-h-0 flex-col rounded-xl">
+    <aside data-testid="agent-cluster-conversation" className="zone-cluster soft-panel flex h-full min-h-0 flex-col overflow-hidden rounded-xl">
       <div className="border-b p-4">
         <div className="flex items-center gap-2">
           <span className="zone-dot h-2.5 w-2.5 rounded-full" />
@@ -989,7 +2164,7 @@ function AgentConversationPanel({
         )}
       </div>
 
-      <div className="flex-1 space-y-3 overflow-y-auto p-4">
+      <div className="flex-1 space-y-3 overflow-y-auto bg-card/35 p-4">
         {pendingProposals.map((proposal) => (
           <ManagerProposalCard key={proposal.proposalId} proposal={proposal} cluster={cluster} />
         ))}
@@ -1014,7 +2189,7 @@ function AgentConversationPanel({
                   <CheckCircle2 className="h-3.5 w-3.5" />
                   Agent 输出
                 </div>
-                <div className="whitespace-pre-wrap break-words">{output.content}</div>
+                <div className="line-clamp-8 whitespace-pre-wrap break-words">{output.content}</div>
               </div>
             ))}
             {visibleEvents.map((event) => (
@@ -1028,7 +2203,7 @@ function AgentConversationPanel({
                   <span>{event.title}</span>
                   <span>{formatTime(event.createdAt)}</span>
                 </div>
-                <div className="whitespace-pre-wrap break-words">{event.content}</div>
+                <div className="line-clamp-6 whitespace-pre-wrap break-words">{event.content}</div>
               </div>
             ))}
           </>
@@ -1121,7 +2296,7 @@ function AgentClusterAgentRail({
   onSelectAgent: (agentId: string | null) => void;
 }) {
   return (
-    <aside data-testid="agent-cluster-agent-rail" className="zone-cluster glass-shell flex h-full min-h-0 flex-col rounded-xl p-3">
+    <aside data-testid="agent-cluster-agent-rail" className="zone-cluster soft-panel flex h-full min-h-0 flex-col overflow-hidden rounded-xl p-3">
       <button
         type="button"
         onClick={() => onSelectAgent(null)}
@@ -1172,22 +2347,37 @@ function AgentClusterDetailPage({ cluster }: { cluster: AgentCluster }) {
   const renameCluster = useAgentClusterStore((state) => state.renameCluster);
   const saveExecutionGraph = useAgentClusterStore((state) => state.saveExecutionGraph);
   const confirmExecutionGraph = useAgentClusterStore((state) => state.confirmExecutionGraph);
+  const saveWorkflow = useAgentClusterStore((state) => state.saveWorkflow);
+  const confirmWorkflow = useAgentClusterStore((state) => state.confirmWorkflow);
+  const rollbackWorkflow = useAgentClusterStore((state) => state.rollbackWorkflow);
   const startRun = useAgentClusterStore((state) => state.startRun);
+  const pauseRun = useAgentClusterStore((state) => state.pauseRun);
+  const resumeRun = useAgentClusterStore((state) => state.resumeRun);
+  const stopRun = useAgentClusterStore((state) => state.stopRun);
+  const decideHumanGate = useAgentClusterStore((state) => state.decideHumanGate);
   const refreshRunEvents = useAgentClusterStore((state) => state.refreshRunEvents);
   const resetRun = useAgentClusterStore((state) => state.resetRun);
   const resumeRunFromAgent = useAgentClusterStore((state) => state.resumeRunFromAgent);
   const retryRunAgent = useAgentClusterStore((state) => state.retryRunAgent);
   const skipRunAgent = useAgentClusterStore((state) => state.skipRunAgent);
-  const loadCluster = useAgentClusterStore((state) => state.loadCluster);
+  const createAgent = useAgentClusterStore((state) => state.createAgent);
+  const sendManagerMessage = useAgentClusterStore((state) => state.sendManagerMessage);
+  const selectedBaseModel = useBaseModelStore((state) => state.selectedModel);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(cluster.clusterName);
   const [editingGraph, setEditingGraph] = useState(false);
   const [draftGraph, setDraftGraph] = useState<AgentClusterExecutionGraph>(() => getClusterExecutionGraph(cluster));
+  const [legacyGraphDirty, setLegacyGraphDirty] = useState(false);
+  const currentWorkflow = getCurrentWorkflow(cluster);
+  const [draftWorkflow, setDraftWorkflow] = useState<AgentClusterWorkflow | null>(() => currentWorkflow ? structuredClone(currentWorkflow) : null);
   const [leftPaneWidth, setLeftPaneWidth] = useState(260);
   const [rightPaneWidth, setRightPaneWidth] = useState(420);
+  const [showLegacyGraph, setShowLegacyGraph] = useState(false);
+  const [centerTab, setCenterTab] = useState<AgentClusterCenterTab>('monitor');
+  const containerRef = useRef<HTMLDivElement>(null);
   const selectedAgent = cluster.agents.find((agent) => agent.agentId === selectedAgentId) ?? null;
   const executionGraph = getClusterExecutionGraph(cluster);
-  const orchestrationConfirmed = executionGraph.confirmed;
+  const orchestrationConfirmed = currentWorkflow?.status === 'confirmed';
   const activeRun = cluster.runs?.find((run) => run.runId === cluster.activeRunId) ?? null;
   const runningCount = activeRun?.childRuns.filter((child) => child.status === 'running' || child.status === 'starting').length ?? 0;
   const blockedCount = activeRun?.childRuns.filter((child) => child.status === 'blocked').length ?? 0;
@@ -1197,40 +2387,41 @@ function AgentClusterDetailPage({ cluster }: { cluster: AgentCluster }) {
   const failedCount = latestRun?.failedChildCount ?? latestRun?.childRuns.filter((child) => child.status === 'error' || child.status === 'timeout').length ?? 0;
   const latestEvent = cluster.events?.[0] ?? null;
   const canControlLatestRun = Boolean(latestRun);
+  const waitingHumanNodes = latestRun?.nodeRuns?.filter((nodeRun) => nodeRun.status === 'waiting_human') ?? [];
 
   const startResize = (pane: 'left' | 'right', startEvent: ReactMouseEvent<HTMLDivElement>) => {
     startEvent.preventDefault();
     const startX = startEvent.clientX;
     const startLeft = leftPaneWidth;
     const startRight = rightPaneWidth;
+    const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
     const onMouseMove = (event: MouseEvent) => {
       const delta = event.clientX - startX;
+      const container = containerRef.current;
+      if (!container) return;
       if (pane === 'left') {
-        setLeftPaneWidth(Math.min(360, Math.max(220, startLeft + delta)));
+        container.style.setProperty('--agent-cluster-left-pane', `${clamp(startLeft + delta, 220, 360)}px`);
       } else {
-        setRightPaneWidth(Math.min(560, Math.max(320, startRight - delta)));
+        container.style.setProperty('--agent-cluster-right-pane', `${clamp(startRight - delta, 320, 560)}px`);
       }
     };
-    const onMouseUp = () => {
+    const onMouseUp = (event: MouseEvent) => {
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
+      const delta = event.clientX - startX;
+      if (pane === 'left') {
+        setLeftPaneWidth(clamp(startLeft + delta, 220, 360));
+      } else {
+        setRightPaneWidth(clamp(startRight - delta, 320, 560));
+      }
     };
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
   };
-
-  useEffect(() => {
-    if (!cluster.activeRunId) return;
-    const timer = window.setInterval(() => {
-      void loadCluster(cluster.clusterId);
-      void refreshRunEvents(cluster.clusterId, cluster.activeRunId!);
-    }, 4000);
-    return () => window.clearInterval(timer);
-  }, [cluster.activeRunId, cluster.clusterId, loadCluster, refreshRunEvents]);
 
   const submitRename = async () => {
     const next = nameDraft.trim();
@@ -1241,17 +2432,23 @@ function AgentClusterDetailPage({ cluster }: { cluster: AgentCluster }) {
   };
 
   const saveGraph = async () => {
-    await saveExecutionGraph(cluster.clusterId, draftGraph);
+    if (legacyGraphDirty) await saveExecutionGraph(cluster.clusterId, draftGraph);
+    if (draftWorkflow) await saveWorkflow(cluster.clusterId, draftWorkflow);
+    setLegacyGraphDirty(false);
     setEditingGraph(false);
   };
 
   const confirmGraph = async () => {
     const graphToConfirm = editingGraph ? draftGraph : executionGraph;
     if (editingGraph) {
-      await saveExecutionGraph(cluster.clusterId, graphToConfirm);
+      if (legacyGraphDirty) await saveExecutionGraph(cluster.clusterId, graphToConfirm);
+      if (draftWorkflow) await saveWorkflow(cluster.clusterId, draftWorkflow);
+      setLegacyGraphDirty(false);
       setEditingGraph(false);
     }
-    await confirmExecutionGraph(cluster.clusterId);
+    const workflow = getCurrentWorkflow(useAgentClusterStore.getState().clusters.find((item) => item.clusterId === cluster.clusterId) ?? cluster);
+    if (workflow) await confirmWorkflow(cluster.clusterId, workflow.workflowId);
+    else await confirmExecutionGraph(cluster.clusterId);
   };
 
   const handleResetLatestRun = async () => {
@@ -1261,9 +2458,16 @@ function AgentClusterDetailPage({ cluster }: { cluster: AgentCluster }) {
     await resetRun(cluster.clusterId, latestRun.runId);
   };
 
+  const centerTabs: Array<{ id: AgentClusterCenterTab; label: string; hint: string }> = [
+    { id: 'monitor', label: '运行监控', hint: '节点状态与控制' },
+    { id: 'workflow', label: 'Workflow', hint: '链路与编排' },
+    { id: 'context', label: '共享上下文', hint: '全局记忆' },
+  ];
+
   return (
     <div data-testid="agent-cluster-detail-page" className="zone-cluster -m-6 min-h-[calc(100vh-2.5rem)] bg-transparent">
       <div
+        ref={containerRef}
         className="flex min-h-[calc(100vh-2.5rem)] flex-col gap-4 overflow-y-auto p-4 xl:h-[calc(100vh-2.5rem)] xl:overflow-hidden xl:flex-row"
         style={{
           '--agent-cluster-left-pane': `${leftPaneWidth}px`,
@@ -1279,8 +2483,9 @@ function AgentClusterDetailPage({ cluster }: { cluster: AgentCluster }) {
           onMouseDown={(event) => startResize('left', event)}
           aria-hidden="true"
         />
-        <main className="glass-shell min-h-[420px] min-w-0 flex-1 overflow-y-auto rounded-xl p-4 xl:min-h-0">
-          <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
+        <main className="soft-panel flex min-h-[420px] min-w-0 flex-1 flex-col overflow-hidden rounded-xl xl:min-h-0">
+          <div className="min-h-0 flex-1 overflow-y-auto bg-card/35 p-4">
+            <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
             <div>
               <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground">
                 <GitBranch className="h-4 w-4" />
@@ -1329,7 +2534,12 @@ function AgentClusterDetailPage({ cluster }: { cluster: AgentCluster }) {
               <Button
                 variant="outline"
                 onClick={() => {
-                  if (!editingGraph) setDraftGraph(executionGraph);
+                  if (!editingGraph) {
+                    setDraftGraph(executionGraph);
+                    setDraftWorkflow(currentWorkflow ? structuredClone(currentWorkflow) : null);
+                    setLegacyGraphDirty(false);
+                    setCenterTab('workflow');
+                  }
                   setEditingGraph((value) => !value);
                 }}
                 disabled={Boolean(cluster.activeRunId)}
@@ -1354,6 +2564,24 @@ function AgentClusterDetailPage({ cluster }: { cluster: AgentCluster }) {
                 {cluster.activeRunId ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
                 {cluster.activeRunId ? `运行中 ${runningCount}/${cluster.agents.length}` : orchestrationConfirmed ? '启动运行' : '先确认编排'}
               </Button>
+              {activeRun?.harnessStatus === 'running' && (
+                <Button variant="outline" onClick={() => void pauseRun(cluster.clusterId, activeRun.runId)}>
+                  <Pause className="mr-2 h-4 w-4" />
+                  暂停
+                </Button>
+              )}
+              {activeRun && (activeRun.harnessStatus === 'paused' || activeRun.harnessStatus === 'waiting_human') && (
+                <Button variant="outline" onClick={() => void resumeRun(cluster.clusterId, activeRun.runId)} disabled={activeRun.harnessStatus === 'waiting_human'}>
+                  <Play className="mr-2 h-4 w-4" />
+                  恢复
+                </Button>
+              )}
+              {activeRun && (
+                <Button variant="outline" onClick={() => void stopRun(cluster.clusterId, activeRun.runId)}>
+                  <Square className="mr-2 h-4 w-4" />
+                  停止
+                </Button>
+              )}
               {latestRun && (
                 <Button
                   variant="outline"
@@ -1369,63 +2597,128 @@ function AgentClusterDetailPage({ cluster }: { cluster: AgentCluster }) {
 
           {!orchestrationConfirmed && (
             <div className="mb-6 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm leading-6 text-amber-800 dark:text-amber-200">
-              LLM 已生成建议编排图，但还不会直接运行。你可以先编辑 blocks/reviews 阻塞边，确认后运行器会按 DAG 严格调度，而不是默认并行启动所有 Agent。
+              规划模型已生成 Workflow 草稿。请检查 Agent、Fan-out、Join、Gate、Review、Reduce、Loop 与 Human Gate，确认后 Harness 才能启动。
             </div>
           )}
 
-          {latestRun && (
+          <div data-testid="agent-cluster-center-tabs" className="mb-4 flex flex-wrap gap-2 rounded-xl border border-border/70 bg-background/60 p-1">
+            {centerTabs.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setCenterTab(tab.id)}
+                className={cn(
+                  'flex min-w-32 flex-1 flex-col rounded-lg px-3 py-2 text-left transition-shadow hover:shadow-sm md:flex-none',
+                  centerTab === tab.id ? 'bg-card shadow-sm' : 'text-muted-foreground',
+                )}
+              >
+                <span className="text-sm font-medium">{tab.label}</span>
+                <span className="mt-0.5 text-[11px]">{tab.hint}</span>
+              </button>
+            ))}
+          </div>
+
+          {centerTab === 'monitor' && (
             <div data-testid="agent-cluster-run-monitor" className="soft-panel mb-5 rounded-xl p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <div className="text-sm font-semibold">运行监控</div>
                   <div className="mt-1 text-xs text-muted-foreground">
-                    {latestRun.status === 'running' ? '正在执行' : latestRun.status === 'completed' ? '已完成' : latestRun.status === 'error' ? '需处理' : '等待事件'}
+                    {latestRun ? runMonitorStatusText(latestRun) : '等待启动'}
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant="outline">round {latestRun.roundStart ?? latestRun.childRuns.find((child) => typeof child.iteration === 'number')?.iteration ?? 1}</Badge>
+                  <Badge variant="outline">round {latestRun?.roundStart ?? latestRun?.childRuns.find((child) => typeof child.iteration === 'number')?.iteration ?? 1}</Badge>
+                  <Badge variant="outline">Workflow v{latestRun?.workflowSnapshot?.version ?? currentWorkflow?.version ?? 1}</Badge>
                   <Badge variant="secondary">已提交 {submittedCount}/{cluster.agents.length}</Badge>
                   <Badge variant="secondary">完成 {completedCount}</Badge>
                   <Badge variant="secondary">阻塞 {blockedCount}</Badge>
                   <Badge variant={failedCount > 0 ? 'destructive' : 'secondary'}>异常 {failedCount}</Badge>
-                  {(latestRun.loopStates ?? []).map((loop) => (
+                  {(latestRun?.loopStates ?? []).map((loop) => (
                     <Badge key={loop.loopId} variant="outline">
                       循环 {loop.currentIteration}/{loop.repeatCount}
                     </Badge>
                   ))}
-                  <Button variant="outline" size="sm" onClick={() => void refreshRunEvents(cluster.clusterId, latestRun.runId)}>
-                    刷新运行事件
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={() => void handleResetLatestRun()}>
-                    重置运行状态
-                  </Button>
+                  {latestRun && (
+                    <>
+                      <Button variant="outline" size="sm" onClick={() => void refreshRunEvents(cluster.clusterId, latestRun.runId)}>
+                        刷新运行事件
+                      </Button>
+                      <Button variant="outline" size="sm" onClick={() => void handleResetLatestRun()}>
+                        重置运行状态
+                      </Button>
+                    </>
+                  )}
                 </div>
               </div>
+              <div className="mt-3 rounded-xl border border-border/70 bg-card/45 px-3 py-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2 text-sm font-medium">
+                      <Sparkles className="h-4 w-4 text-muted-foreground" />
+                      Cluster Manager
+                    </div>
+                    <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                      {latestRun ? '总控运行、提案、人工门禁和结果汇总。' : '等待你确认 Workflow 并启动运行。'}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Badge variant="outline">{latestRun ? latestRun.harnessStatus : 'idle'}</Badge>
+                    <Badge variant="outline">{cluster.agents.length} Agents</Badge>
+                  </div>
+                </div>
+                {latestEvent && (
+                  <div className="mt-2 line-clamp-2 text-xs text-muted-foreground">
+                    最近事件：{latestEvent.title} · {latestEvent.content}
+                  </div>
+                )}
+              </div>
+              {latestRun && waitingHumanNodes.map((nodeRun) => {
+                const node = latestRun.workflowSnapshot?.nodes.find((item) => item.nodeId === nodeRun.nodeId);
+                return (
+                  <div key={nodeRun.nodeId} className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/70 px-3 py-2">
+                    <div>
+                      <div className="text-sm font-medium">{node?.name ?? 'Human Gate'}</div>
+                      <div className="text-xs text-muted-foreground">{nodeRun.waitingReason ?? '等待你的决定'}</div>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button size="sm" onClick={() => void decideHumanGate(cluster.clusterId, latestRun.runId, nodeRun.nodeId, 'approve')}>批准继续</Button>
+                      <Button size="sm" variant="outline" onClick={() => void decideHumanGate(cluster.clusterId, latestRun.runId, nodeRun.nodeId, 'reject')}>拒绝</Button>
+                    </div>
+                  </div>
+                );
+              })}
               <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-                {latestRun.childRuns.map((child) => {
-                  const agent = cluster.agents.find((item) => item.agentId === child.agentId);
-                  const artifactText = artifactValidationText(child.artifactValidationStatus);
+                {cluster.agents.map((agent) => {
+                  const child = latestRun?.childRuns.find((item) => item.agentId === agent.agentId) ?? null;
+                  const artifactText = child ? artifactValidationText(child.artifactValidationStatus) : null;
                   return (
-                    <div key={child.agentId} className="soft-row rounded-xl px-3 py-2 text-xs">
+                    <div key={agent.agentId} className="soft-row rounded-xl px-3 py-3 text-xs">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="truncate font-medium">{agent?.name ?? child.agentId}</span>
-                        <span className={cn(
-                          'rounded-full px-2 py-0.5',
-                          child.status === 'completed' && 'bg-emerald-500/10 text-emerald-700',
-                          (child.status === 'error' || child.status === 'timeout') && 'bg-destructive/10 text-destructive',
-                          (child.status === 'running' || child.status === 'starting') && 'bg-card text-foreground',
-                          child.status === 'blocked' && 'bg-amber-500/10 text-amber-700',
-                        )}>
-                          {childRunStatusText(child.status)}
-                        </span>
+                        <span className="min-w-0 truncate font-medium">{agent.name}</span>
+                        {child ? (
+                          <span className={cn(
+                            'rounded-full px-2 py-0.5',
+                            child.status === 'completed' && 'bg-emerald-500/10 text-emerald-700',
+                            (child.status === 'error' || child.status === 'timeout') && 'bg-destructive/10 text-destructive',
+                            (child.status === 'running' || child.status === 'starting') && 'bg-card text-foreground',
+                            child.status === 'blocked' && 'bg-amber-500/10 text-amber-700',
+                          )}>
+                            {childRunStatusText(child.status)}
+                          </span>
+                        ) : (
+                          <Badge variant="outline" className="text-[10px]">待启动</Badge>
+                        )}
                       </div>
-                      <div className="mt-1 truncate text-muted-foreground">{child.submitStatus ?? 'pending'} · Agent 子会话</div>
-                      {typeof child.targetCandidateCount === 'number' && (
+                      <div className="mt-1 truncate text-muted-foreground">{agent.role}</div>
+                      {agent.description && <div className="mt-1 line-clamp-2 leading-5 text-muted-foreground">{agent.description}</div>}
+                      {child && <div className="mt-2 truncate text-muted-foreground">{child.submitStatus ?? 'pending'} · Agent 子会话</div>}
+                      {child && typeof child.targetCandidateCount === 'number' && (
                         <div className="mt-1 text-muted-foreground">
                           候选：{child.actualCandidateCount ?? 0}/{child.targetCandidateCount}
                         </div>
                       )}
-                      {artifactText && (
+                      {child && artifactText && (
                         <div className={cn(
                           'mt-1',
                           child.artifactValidationStatus === 'passed' && 'text-emerald-700 dark:text-emerald-300',
@@ -1436,18 +2729,18 @@ function AgentClusterDetailPage({ cluster }: { cluster: AgentCluster }) {
                           {artifactText}
                         </div>
                       )}
-                      {child.completionSource && (
+                      {child?.completionSource && (
                         <div className="mt-1 text-emerald-700 dark:text-emerald-300">
                           完成信号：{child.completionSource}
                         </div>
                       )}
-                      {typeof child.iteration === 'number' && (
+                      {child && typeof child.iteration === 'number' && (
                         <div className="mt-1 text-muted-foreground">第 {child.iteration} 轮</div>
                       )}
-                      {child.runtimeWaitReason && <div className="mt-1 line-clamp-2 text-muted-foreground">等待产物：{child.runtimeWaitReason}</div>}
-                      {child.artifactValidationError && <div className="mt-1 line-clamp-2 text-destructive">{child.artifactValidationError}</div>}
-                      {child.error && <div className="mt-1 line-clamp-2 text-destructive">{child.error}</div>}
-                      {canControlLatestRun && (
+                      {child?.runtimeWaitReason && <div className="mt-1 line-clamp-2 text-muted-foreground">等待产物：{child.runtimeWaitReason}</div>}
+                      {child?.artifactValidationError && <div className="mt-1 line-clamp-2 text-destructive">{child.artifactValidationError}</div>}
+                      {child?.error && <div className="mt-1 line-clamp-2 text-destructive">{child.error}</div>}
+                      {latestRun && child && canControlLatestRun && (
                         <div className="mt-2 flex flex-wrap gap-2">
                           {(child.status === 'error' || child.status === 'timeout') && (
                             <Button variant="outline" size="sm" className="h-7 px-2 text-[11px]" onClick={() => void retryRunAgent(cluster.clusterId, latestRun.runId, child.agentId)}>
@@ -1474,24 +2767,110 @@ function AgentClusterDetailPage({ cluster }: { cluster: AgentCluster }) {
                   );
                 })}
               </div>
-              {latestEvent && (
-                <div className="mt-3 rounded-lg border border-border/60 bg-card/50 px-3 py-2 text-xs text-muted-foreground">
-                  最近事件：{latestEvent.title} · {latestEvent.content}
-                </div>
-              )}
             </div>
           )}
 
+          {centerTab === 'workflow' && (
           <div className="grid gap-5">
-            <AgentGraph
-              cluster={cluster}
-              selectedAgentId={selectedAgentId}
-              onSelectAgent={selectAgent}
-              editing={editingGraph}
-              draftGraph={editingGraph ? draftGraph : executionGraph}
-              onDraftGraphChange={setDraftGraph}
-            />
-            <SharedContextPanel cluster={cluster} />
+            {draftWorkflow && (
+              editingGraph ? (
+                  <WorkflowEditor
+                    workflow={draftWorkflow}
+                    run={latestRun}
+                    editing
+                    onChange={setDraftWorkflow}
+                    onManualCreateAgent={async (input) => {
+                      const updatedCluster = await createAgent(cluster.clusterId, input);
+                      const nextWorkflow = updatedCluster ? getCurrentWorkflow(updatedCluster) : null;
+                      if (nextWorkflow) setDraftWorkflow(structuredClone(nextWorkflow));
+                    }}
+                    onAiCreateAgent={async (prompt) => {
+                      await sendManagerMessage(cluster.clusterId, { content: prompt, baseModel: selectedBaseModel });
+                    }}
+                  />
+              ) : (
+                <section data-testid="agent-cluster-workflow-summary" className="soft-panel rounded-xl p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <Network className="h-4 w-4 text-muted-foreground" />
+                        <h2 className="text-sm font-semibold">Harness Workflow v{(currentWorkflow ?? draftWorkflow).version}</h2>
+                        <Badge variant={(currentWorkflow ?? draftWorkflow).status === 'confirmed' ? 'secondary' : 'outline'}>
+                          {(currentWorkflow ?? draftWorkflow).status === 'confirmed' ? '已确认' : '草稿'}
+                        </Badge>
+                      </div>
+                      <p className="mt-1 text-xs text-muted-foreground">轻量进度视图；完整编辑器仅在“编辑编排”时挂载。</p>
+                    </div>
+                    <Badge variant="outline">最大并发 {(currentWorkflow ?? draftWorkflow).policy.maxConcurrency}</Badge>
+                  </div>
+                  <WorkflowOverview workflow={currentWorkflow ?? draftWorkflow} run={latestRun} />
+                </section>
+              )
+            )}
+            {editingGraph && (cluster.workflows?.length ?? 0) > 1 && (
+                  <details className="soft-panel rounded-xl p-4">
+                    <summary className="cursor-pointer text-sm font-medium">Workflow 版本历史</summary>
+                    <div className="mt-3 space-y-2">
+                      {cluster.workflows?.map((workflow) => (
+                        <div key={workflow.workflowId} className="soft-row flex flex-wrap items-center justify-between gap-3 rounded-lg px-3 py-2 text-xs">
+                          <div>
+                            <span className="font-medium">v{workflow.version}</span>
+                            <span className="ml-2 text-muted-foreground">
+                              {workflow.status} · {workflow.nodes.length} 节点 · {workflow.edges.length} 连接 · {workflow.createdBy}
+                            </span>
+                          </div>
+                          {workflow.workflowId !== cluster.currentWorkflowId && !cluster.activeRunId && (
+                            <Button variant="outline" size="sm" onClick={() => void rollbackWorkflow(cluster.clusterId, workflow.workflowId)}>
+                              以此版本创建草稿
+                            </Button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+            )}
+            {editingGraph && (
+              <section className="soft-panel rounded-xl p-4">
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between text-left text-sm font-medium"
+                  onClick={() => setShowLegacyGraph((value) => !value)}
+                >
+                  <span>旧 Agent 关系图（兼容编辑）</span>
+                  <span className="text-xs text-muted-foreground">{showLegacyGraph ? '收起' : '展开'}</span>
+                </button>
+                {showLegacyGraph && (
+                  <div className="mt-4">
+                  <AgentGraph
+                    cluster={cluster}
+                    selectedAgentId={selectedAgentId}
+                    onSelectAgent={selectAgent}
+                    editing
+                    draftGraph={draftGraph}
+                    onDraftGraphChange={(graph) => {
+                      setDraftGraph(graph);
+                      setLegacyGraphDirty(true);
+                    }}
+                  />
+                  </div>
+                )}
+              </section>
+            )}
+          </div>
+          )}
+
+          {centerTab === 'context' && (
+            <section className="soft-panel rounded-xl p-4">
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold">共享上下文</h2>
+                  <p className="mt-1 text-xs text-muted-foreground">全局目标、约束、决策和 Agent 摘要。</p>
+                </div>
+                <Badge variant="outline">ClusterContext</Badge>
+              </div>
+              <SharedContextPanel cluster={cluster} />
+            </section>
+          )}
           </div>
         </main>
         <div

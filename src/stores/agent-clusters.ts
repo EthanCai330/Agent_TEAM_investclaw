@@ -5,6 +5,8 @@ import type {
   AgentCluster,
   AgentClusterCreationStatus,
   AgentClusterExecutionGraph,
+  AgentClusterWorkflow,
+  CreateAgentClusterAgentRequest,
   CreateAgentClusterRequest,
   SendAgentClusterManagerMessageRequest,
   SendAgentClusterMessageRequest,
@@ -33,6 +35,8 @@ type AgentClusterDeleteResponse = {
   error?: string;
 };
 
+type AgentClusterUpdate = Pick<AgentCluster, 'clusterId' | 'clusterName'> & Partial<AgentCluster>;
+
 interface AgentClusterState {
   clusters: AgentCluster[];
   selectedClusterId: string | null;
@@ -49,7 +53,15 @@ interface AgentClusterState {
   deleteCluster: (clusterId: string) => Promise<void>;
   saveExecutionGraph: (clusterId: string, graph: Partial<AgentClusterExecutionGraph>) => Promise<void>;
   confirmExecutionGraph: (clusterId: string) => Promise<void>;
+  saveWorkflow: (clusterId: string, workflow: Partial<AgentClusterWorkflow>) => Promise<void>;
+  confirmWorkflow: (clusterId: string, workflowId?: string) => Promise<void>;
+  rollbackWorkflow: (clusterId: string, workflowId: string) => Promise<void>;
+  createAgent: (clusterId: string, input: CreateAgentClusterAgentRequest) => Promise<AgentCluster | null>;
   startRun: (clusterId: string) => Promise<void>;
+  pauseRun: (clusterId: string, runId: string) => Promise<void>;
+  resumeRun: (clusterId: string, runId: string) => Promise<void>;
+  stopRun: (clusterId: string, runId: string) => Promise<void>;
+  decideHumanGate: (clusterId: string, runId: string, nodeId: string, decision: 'approve' | 'reject') => Promise<void>;
   refreshRunEvents: (clusterId: string, runId: string) => Promise<void>;
   resetRun: (clusterId: string, runId: string) => Promise<void>;
   resumeRunFromAgent: (clusterId: string, runId: string, agentId: string) => Promise<void>;
@@ -59,7 +71,7 @@ interface AgentClusterState {
   applyManagerProposal: (clusterId: string, proposalId: string) => Promise<void>;
   dismissManagerProposal: (clusterId: string, proposalId: string) => Promise<void>;
   sendMessage: (clusterId: string, input: SendAgentClusterMessageRequest) => Promise<void>;
-  applyClusterUpdate: (cluster: AgentCluster) => void;
+  applyClusterUpdate: (cluster: AgentClusterUpdate) => void;
   applyCreationStatus: (status: AgentClusterCreationStatus) => void;
   selectCluster: (clusterId: string | null) => void;
   selectAgent: (agentId: string | null) => void;
@@ -67,9 +79,11 @@ interface AgentClusterState {
 }
 
 function upsertCluster(clusters: AgentCluster[], cluster: AgentCluster): AgentCluster[] {
-  const next = clusters.filter((item) => item.clusterId !== cluster.clusterId);
-  next.unshift(cluster);
-  return next.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const existingIndex = clusters.findIndex((item) => item.clusterId === cluster.clusterId);
+  if (existingIndex >= 0) {
+    return clusters.map((item, index) => index === existingIndex ? cluster : item);
+  }
+  return [cluster, ...clusters].sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
 }
 
 function isAgentCluster(value: unknown): value is AgentCluster {
@@ -79,6 +93,63 @@ function isAgentCluster(value: unknown): value is AgentCluster {
     && typeof (value as { clusterId?: unknown }).clusterId === 'string'
     && typeof (value as { clusterName?: unknown }).clusterName === 'string',
   );
+}
+
+function mergeAgentClusterUpdate(existing: AgentCluster | undefined, update: AgentClusterUpdate): AgentCluster {
+  if (!existing) return update as AgentCluster;
+  const existingAgents = new Map(existing.agents.map((agent) => [agent.agentId, agent]));
+  const agents = update.agents?.map((agent) => {
+    const current = existingAgents.get(agent.agentId);
+    if (!current) return agent;
+    return {
+      ...current,
+      ...agent,
+      localContext: {
+        ...current.localContext,
+        ...agent.localContext,
+      },
+    };
+  }) ?? existing.agents;
+  return {
+    ...existing,
+    ...update,
+    agents,
+    sharedContext: {
+      ...existing.sharedContext,
+      ...(update.sharedContext ?? {}),
+    },
+  };
+}
+
+function visibleClusterSignature(cluster: AgentCluster): string {
+  const latestRun = cluster.runs?.[0];
+  return JSON.stringify({
+    clusterId: cluster.clusterId,
+    clusterName: cluster.clusterName,
+    activeRunId: cluster.activeRunId,
+    agents: cluster.agents.map((agent) => [
+      agent.agentId,
+      agent.status,
+      agent.currentTask,
+      agent.runtimeStatusReason,
+      agent.localContext.outputs?.length ?? 0,
+    ]),
+    events: cluster.events?.slice(0, 40).map((event) => event.eventId) ?? [],
+    latestRun: latestRun ? [
+      latestRun.runId,
+      latestRun.status,
+      latestRun.harnessStatus,
+      latestRun.submittedChildCount,
+      latestRun.completedChildCount,
+      latestRun.failedChildCount,
+      latestRun.childRuns.map((child) => [
+        child.agentId,
+        child.status,
+        child.submitStatus,
+        child.runtimeWaitReason,
+      ]),
+    ] : null,
+  });
 }
 
 function requireCluster(response: AgentClusterResponse, action: string): AgentCluster {
@@ -238,6 +309,76 @@ export const useAgentClusterStore = create<AgentClusterState>((set) => ({
     }
   },
 
+  saveWorkflow: async (clusterId, workflow) => {
+    set({ error: null });
+    try {
+      const response = await hostApiFetch<AgentClusterResponse>(
+        `/api/agent-clusters/${encodeURIComponent(clusterId)}/workflow`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify(workflow),
+        },
+      );
+      const cluster = requireCluster(response, '保存 Workflow');
+      set((state) => ({ clusters: upsertCluster(state.clusters, cluster) }));
+    } catch (error) {
+      set({ error: getErrorMessage(error) });
+    }
+  },
+
+  confirmWorkflow: async (clusterId, workflowId) => {
+    set({ error: null });
+    try {
+      const response = await hostApiFetch<AgentClusterResponse>(
+        `/api/agent-clusters/${encodeURIComponent(clusterId)}/workflow/confirm`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ workflowId }),
+        },
+      );
+      const cluster = requireCluster(response, '确认 Workflow');
+      set((state) => ({ clusters: upsertCluster(state.clusters, cluster) }));
+    } catch (error) {
+      set({ error: getErrorMessage(error) });
+    }
+  },
+
+  rollbackWorkflow: async (clusterId, workflowId) => {
+    set({ error: null });
+    try {
+      const response = await hostApiFetch<AgentClusterResponse>(
+        `/api/agent-clusters/${encodeURIComponent(clusterId)}/workflow/rollback`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ workflowId }),
+        },
+      );
+      const cluster = requireCluster(response, '回退 Workflow');
+      set((state) => ({ clusters: upsertCluster(state.clusters, cluster) }));
+    } catch (error) {
+      set({ error: getErrorMessage(error) });
+    }
+  },
+
+  createAgent: async (clusterId, input) => {
+    set({ error: null });
+    try {
+      const response = await hostApiFetch<AgentClusterResponse>(
+        `/api/agent-clusters/${encodeURIComponent(clusterId)}/agents`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+      );
+      const cluster = requireCluster(response, '新增 Agent');
+      set((state) => ({ clusters: upsertCluster(state.clusters, cluster) }));
+      return cluster;
+    } catch (error) {
+      set({ error: getErrorMessage(error) });
+      return null;
+    }
+  },
+
   startRun: async (clusterId) => {
     set({ error: null });
     try {
@@ -246,6 +387,65 @@ export const useAgentClusterStore = create<AgentClusterState>((set) => ({
         { method: 'POST' },
       );
       const cluster = requireCluster(response, '启动运行');
+      set((state) => ({ clusters: upsertCluster(state.clusters, cluster) }));
+    } catch (error) {
+      set({ error: getErrorMessage(error) });
+    }
+  },
+
+  pauseRun: async (clusterId, runId) => {
+    set({ error: null });
+    try {
+      const response = await hostApiFetch<AgentClusterResponse>(
+        `/api/agent-clusters/${encodeURIComponent(clusterId)}/runs/${encodeURIComponent(runId)}/pause`,
+        { method: 'POST' },
+      );
+      const cluster = requireCluster(response, '暂停运行');
+      set((state) => ({ clusters: upsertCluster(state.clusters, cluster) }));
+    } catch (error) {
+      set({ error: getErrorMessage(error) });
+    }
+  },
+
+  resumeRun: async (clusterId, runId) => {
+    set({ error: null });
+    try {
+      const response = await hostApiFetch<AgentClusterResponse>(
+        `/api/agent-clusters/${encodeURIComponent(clusterId)}/runs/${encodeURIComponent(runId)}/resume`,
+        { method: 'POST' },
+      );
+      const cluster = requireCluster(response, '恢复运行');
+      set((state) => ({ clusters: upsertCluster(state.clusters, cluster) }));
+    } catch (error) {
+      set({ error: getErrorMessage(error) });
+    }
+  },
+
+  stopRun: async (clusterId, runId) => {
+    set({ error: null });
+    try {
+      const response = await hostApiFetch<AgentClusterResponse>(
+        `/api/agent-clusters/${encodeURIComponent(clusterId)}/runs/${encodeURIComponent(runId)}/stop`,
+        { method: 'POST' },
+      );
+      const cluster = requireCluster(response, '停止运行');
+      set((state) => ({ clusters: upsertCluster(state.clusters, cluster) }));
+    } catch (error) {
+      set({ error: getErrorMessage(error) });
+    }
+  },
+
+  decideHumanGate: async (clusterId, runId, nodeId, decision) => {
+    set({ error: null });
+    try {
+      const response = await hostApiFetch<AgentClusterResponse>(
+        `/api/agent-clusters/${encodeURIComponent(clusterId)}/runs/${encodeURIComponent(runId)}/human-gate`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ nodeId, decision }),
+        },
+      );
+      const cluster = requireCluster(response, '提交人工门禁');
       set((state) => ({ clusters: upsertCluster(state.clusters, cluster) }));
     } catch (error) {
       set({ error: getErrorMessage(error) });
@@ -409,7 +609,14 @@ export const useAgentClusterStore = create<AgentClusterState>((set) => ({
 
   applyClusterUpdate: (cluster) => {
     if (!isAgentCluster(cluster)) return;
-    set((state) => ({ clusters: upsertCluster(state.clusters, cluster) }));
+    set((state) => {
+      const existing = state.clusters.find((item) => item.clusterId === cluster.clusterId);
+      const merged = mergeAgentClusterUpdate(existing, cluster);
+      if (existing && visibleClusterSignature(existing) === visibleClusterSignature(merged)) {
+        return state;
+      }
+      return { clusters: upsertCluster(state.clusters, merged) };
+    });
   },
 
   applyCreationStatus: (status) => {
@@ -422,7 +629,7 @@ export const useAgentClusterStore = create<AgentClusterState>((set) => ({
 }));
 
 if (typeof window !== 'undefined') {
-  subscribeHostEvent<{ cluster?: AgentCluster }>('agent-cluster:updated', (payload) => {
+  subscribeHostEvent<{ cluster?: AgentClusterUpdate }>('agent-cluster:updated', (payload) => {
     if (payload.cluster) {
       useAgentClusterStore.getState().applyClusterUpdate(payload.cluster);
     }

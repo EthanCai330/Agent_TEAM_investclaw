@@ -3,6 +3,7 @@ import type { HostApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
 import {
   applyAgentClusterManagerProposal,
+  createAgentClusterAgent,
   createAgentCluster,
   confirmAgentClusterExecutionGraph,
   deleteAgentCluster,
@@ -10,16 +11,24 @@ import {
   getAgentClusterCreationStatus,
   getAgentCluster,
   listAgentClusters,
+  pauseAgentClusterRun,
   refreshAgentClusterRunEvents,
+  resumeAgentClusterRun,
   resetAgentClusterRun,
+  rollbackAgentClusterWorkflow,
   resumeAgentClusterRunFromAgent,
   retryAgentClusterRunAgent,
+  decideAgentClusterHumanGate,
   sendAgentClusterManagerMessage,
   skipAgentClusterRunAgent,
   startAgentClusterRun,
+  stopAgentClusterRun,
   sendAgentClusterMessage,
   updateAgentCluster,
   updateAgentClusterExecutionGraph,
+  updateAgentClusterWorkflow,
+  confirmAgentClusterWorkflow,
+  type CreateAgentClusterAgentInput,
   type CreateAgentClusterInput,
   type SendAgentClusterMessageInput,
   type SendAgentClusterManagerMessageInput,
@@ -42,9 +51,6 @@ export async function handleAgentClusterRoutes(
       const cluster = await createAgentCluster(body, (status) => {
         const payload = { status };
         ctx.eventBus.emit('agent-cluster:creation-updated', payload);
-        if (ctx.mainWindow && !ctx.mainWindow.isDestroyed()) {
-          ctx.mainWindow.webContents.send('agent-cluster:creation-updated', payload);
-        }
       });
       sendJson(res, 200, { success: true, cluster });
     } catch (error) {
@@ -57,6 +63,18 @@ export async function handleAgentClusterRoutes(
     const requestId = decodeURIComponent(url.pathname.slice('/api/agent-clusters/creation-status/'.length));
     const status = getAgentClusterCreationStatus(requestId);
     sendJson(res, status ? 200 : 404, status ? { success: true, status } : { success: false, error: 'Creation status not found' });
+    return true;
+  }
+
+  if (url.pathname.startsWith('/api/agent-clusters/') && url.pathname.endsWith('/agents') && req.method === 'POST') {
+    try {
+      const clusterId = decodeURIComponent(url.pathname.slice('/api/agent-clusters/'.length, -'/agents'.length));
+      const body = await parseJsonBody<CreateAgentClusterAgentInput>(req);
+      const cluster = await createAgentClusterAgent(clusterId, body);
+      sendJson(res, 200, { success: true, cluster });
+    } catch (error) {
+      sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
+    }
     return true;
   }
 
@@ -100,6 +118,43 @@ export async function handleAgentClusterRoutes(
     return true;
   }
 
+  if (url.pathname.startsWith('/api/agent-clusters/') && url.pathname.endsWith('/workflow') && req.method === 'PATCH') {
+    try {
+      const clusterId = decodeURIComponent(url.pathname.slice('/api/agent-clusters/'.length, -'/workflow'.length));
+      const body = await parseJsonBody<Record<string, unknown>>(req);
+      const cluster = await updateAgentClusterWorkflow(clusterId, body);
+      sendJson(res, 200, { success: true, cluster });
+    } catch (error) {
+      sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname.startsWith('/api/agent-clusters/') && url.pathname.endsWith('/workflow/confirm') && req.method === 'POST') {
+    try {
+      const clusterId = decodeURIComponent(url.pathname.slice('/api/agent-clusters/'.length, -'/workflow/confirm'.length));
+      const body = await parseJsonBody<{ workflowId?: string }>(req);
+      const cluster = await confirmAgentClusterWorkflow(clusterId, body.workflowId);
+      sendJson(res, 200, { success: true, cluster });
+    } catch (error) {
+      sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname.startsWith('/api/agent-clusters/') && url.pathname.endsWith('/workflow/rollback') && req.method === 'POST') {
+    try {
+      const clusterId = decodeURIComponent(url.pathname.slice('/api/agent-clusters/'.length, -'/workflow/rollback'.length));
+      const body = await parseJsonBody<{ workflowId?: string }>(req);
+      if (!body.workflowId) throw new Error('workflowId is required');
+      const cluster = await rollbackAgentClusterWorkflow(clusterId, body.workflowId);
+      sendJson(res, 200, { success: true, cluster });
+    } catch (error) {
+      sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
   if (url.pathname.startsWith('/api/agent-clusters/') && url.pathname.endsWith('/refresh-events') && req.method === 'POST') {
     try {
       const rest = url.pathname.slice('/api/agent-clusters/'.length, -'/refresh-events'.length);
@@ -124,6 +179,82 @@ export async function handleAgentClusterRoutes(
       const [clusterIdRaw, runsSegment, runIdRaw] = rest.split('/');
       if (runsSegment !== 'runs' || !runIdRaw) throw new Error('Invalid run reset route');
       const cluster = await resetAgentClusterRun(decodeURIComponent(clusterIdRaw), decodeURIComponent(runIdRaw));
+      sendJson(res, 200, { success: true, cluster });
+    } catch (error) {
+      sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname.startsWith('/api/agent-clusters/') && url.pathname.endsWith('/pause') && req.method === 'POST') {
+    try {
+      const rest = url.pathname.slice('/api/agent-clusters/'.length, -'/pause'.length);
+      const [clusterIdRaw, runsSegment, runIdRaw] = rest.split('/');
+      if (runsSegment !== 'runs' || !runIdRaw) throw new Error('Invalid run pause route');
+      const cluster = await pauseAgentClusterRun(
+        decodeURIComponent(clusterIdRaw),
+        decodeURIComponent(runIdRaw),
+        ctx.gatewayManager,
+        ctx.eventBus,
+      );
+      sendJson(res, 200, { success: true, cluster });
+    } catch (error) {
+      sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname.startsWith('/api/agent-clusters/') && url.pathname.endsWith('/resume') && req.method === 'POST') {
+    try {
+      const rest = url.pathname.slice('/api/agent-clusters/'.length, -'/resume'.length);
+      const [clusterIdRaw, runsSegment, runIdRaw] = rest.split('/');
+      if (runsSegment !== 'runs' || !runIdRaw) throw new Error('Invalid run resume route');
+      const cluster = await resumeAgentClusterRun(
+        decodeURIComponent(clusterIdRaw),
+        decodeURIComponent(runIdRaw),
+        ctx.gatewayManager,
+        ctx.eventBus,
+      );
+      sendJson(res, 200, { success: true, cluster });
+    } catch (error) {
+      sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname.startsWith('/api/agent-clusters/') && url.pathname.endsWith('/stop') && req.method === 'POST') {
+    try {
+      const rest = url.pathname.slice('/api/agent-clusters/'.length, -'/stop'.length);
+      const [clusterIdRaw, runsSegment, runIdRaw] = rest.split('/');
+      if (runsSegment !== 'runs' || !runIdRaw) throw new Error('Invalid run stop route');
+      const cluster = await stopAgentClusterRun(
+        decodeURIComponent(clusterIdRaw),
+        decodeURIComponent(runIdRaw),
+        ctx.gatewayManager,
+        ctx.eventBus,
+      );
+      sendJson(res, 200, { success: true, cluster });
+    } catch (error) {
+      sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname.startsWith('/api/agent-clusters/') && url.pathname.endsWith('/human-gate') && req.method === 'POST') {
+    try {
+      const rest = url.pathname.slice('/api/agent-clusters/'.length, -'/human-gate'.length);
+      const [clusterIdRaw, runsSegment, runIdRaw] = rest.split('/');
+      if (runsSegment !== 'runs' || !runIdRaw) throw new Error('Invalid human gate route');
+      const body = await parseJsonBody<{ nodeId?: string; decision?: 'approve' | 'reject' }>(req);
+      if (!body.nodeId || (body.decision !== 'approve' && body.decision !== 'reject')) throw new Error('nodeId and decision are required');
+      const cluster = await decideAgentClusterHumanGate(
+        decodeURIComponent(clusterIdRaw),
+        decodeURIComponent(runIdRaw),
+        body.nodeId,
+        body.decision,
+        ctx.gatewayManager,
+        ctx.eventBus,
+      );
       sendJson(res, 200, { success: true, cluster });
     } catch (error) {
       sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });

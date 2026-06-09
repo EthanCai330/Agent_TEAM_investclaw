@@ -32,6 +32,161 @@ export type AgentClusterArtifactValidationStatus = 'pending' | 'passed' | 'faile
 export type AgentClusterCreationStageStatus = 'pending' | 'running' | 'completed' | 'error';
 export type AgentClusterCreationStatusValue = 'running' | 'completed' | 'error';
 export type AgentClusterManagerProposalStatus = 'pending' | 'applied' | 'dismissed';
+export type AgentClusterWorkflowStatus = 'draft' | 'confirmed' | 'archived';
+export type WorkflowNodeType =
+  | 'agent'
+  | 'fan_out'
+  | 'join'
+  | 'gate'
+  | 'review'
+  | 'reduce'
+  | 'loop'
+  | 'human_gate';
+export type WorkflowNodeRunStatus =
+  | 'pending'
+  | 'ready'
+  | 'running'
+  | 'waiting'
+  | 'waiting_human'
+  | 'completed'
+  | 'failed'
+  | 'skipped'
+  | 'aborted'
+  | 'recovering';
+export type WorkflowFailureAction = 'pause' | 'retry' | 'skip' | 'fail_run';
+export type WorkflowJoinMode = 'all' | 'minimum';
+export type WorkflowGateKind = 'completion' | 'artifact' | 'count' | 'schema';
+export type WorkflowHumanGateDecision = 'approve' | 'reject';
+
+export interface WorkflowRetryPolicy {
+  maxAttempts: number;
+  backoffMs: number;
+  failureAction: WorkflowFailureAction;
+}
+
+export interface WorkflowInputContract {
+  requiredNodeIds?: string[];
+  requiredArtifacts?: string[];
+  schema?: Record<string, unknown>;
+}
+
+export interface WorkflowOutputContract {
+  requiredArtifacts?: string[];
+  minimumCount?: number;
+  schema?: Record<string, unknown>;
+}
+
+export interface WorkflowNodeBase {
+  nodeId: string;
+  type: WorkflowNodeType;
+  name: string;
+  description?: string;
+  x?: number;
+  y?: number;
+  timeoutMs?: number;
+  retryPolicy?: WorkflowRetryPolicy;
+  inputContract?: WorkflowInputContract;
+  outputContract?: WorkflowOutputContract;
+}
+
+export interface WorkflowAgentNode extends WorkflowNodeBase {
+  type: 'agent' | 'review' | 'reduce';
+  agentId: string;
+  reviewTargetNodeIds?: string[];
+  reviseTargetNodeId?: string;
+}
+
+export interface WorkflowFanOutNode extends WorkflowNodeBase {
+  type: 'fan_out';
+  concurrency: number;
+}
+
+export interface WorkflowJoinNode extends WorkflowNodeBase {
+  type: 'join';
+  mode: WorkflowJoinMode;
+  minimumSuccess?: number;
+}
+
+export interface WorkflowGateNode extends WorkflowNodeBase {
+  type: 'gate';
+  gateKind: WorkflowGateKind;
+  minimumCount?: number;
+}
+
+export interface WorkflowLoopNode extends WorkflowNodeBase {
+  type: 'loop';
+  bodyNodeIds: string[];
+  repeatCount: number;
+  exitGateNodeId?: string;
+}
+
+export interface WorkflowHumanGateNode extends WorkflowNodeBase {
+  type: 'human_gate';
+  prompt: string;
+}
+
+export type WorkflowNode =
+  | WorkflowAgentNode
+  | WorkflowFanOutNode
+  | WorkflowJoinNode
+  | WorkflowGateNode
+  | WorkflowLoopNode
+  | WorkflowHumanGateNode;
+
+export interface WorkflowEdge {
+  edgeId: string;
+  fromNodeId: string;
+  toNodeId: string;
+  kind: 'control' | 'data';
+  label?: string;
+}
+
+export interface WorkflowPolicy {
+  maxConcurrency: number;
+  defaultTimeoutMs: number;
+  defaultRetryPolicy: WorkflowRetryPolicy;
+}
+
+export interface AgentClusterWorkflow {
+  workflowId: string;
+  version: number;
+  status: AgentClusterWorkflowStatus;
+  createdBy: 'planner' | 'manager' | 'user' | 'migration';
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+  policy: WorkflowPolicy;
+  createdAt: string;
+  updatedAt: string;
+  confirmedAt?: string;
+}
+
+export interface WorkflowNodeRun {
+  nodeId: string;
+  status: WorkflowNodeRunStatus;
+  attempt: number;
+  startedAt?: string;
+  updatedAt: string;
+  completedAt?: string;
+  input?: Record<string, unknown>;
+  output?: Record<string, unknown>;
+  error?: string;
+  waitingReason?: string;
+  tokenUsage?: {
+    input?: number;
+    output?: number;
+    total?: number;
+  };
+}
+
+export interface WorkflowCheckpoint {
+  checkpointId: string;
+  runId: string;
+  workflowId: string;
+  workflowVersion: number;
+  status: 'running' | 'paused' | 'completed' | 'failed' | 'aborted';
+  nodeRuns: WorkflowNodeRun[];
+  createdAt: string;
+}
 
 export interface AgentClusterEvent {
   eventId: string;
@@ -41,12 +196,14 @@ export interface AgentClusterEvent {
   title: string;
   content: string;
   level: 'info' | 'success' | 'warning' | 'error';
+  display?: 'visible' | 'silent';
   raw?: unknown;
   createdAt: string;
 }
 
 export interface AgentClusterChildRun {
   agentId: string;
+  workflowNodeId?: string;
   sessionKey: string;
   runId: string;
   status: AgentClusterRunStatus;
@@ -101,6 +258,13 @@ export interface AgentClusterRun {
   completedAt?: string;
   error?: string;
   timeoutAt?: string;
+  workflowSnapshot?: AgentClusterWorkflow;
+  nodeRuns?: WorkflowNodeRun[];
+  checkpoint?: WorkflowCheckpoint;
+  harnessStatus?: 'running' | 'paused' | 'waiting_human' | 'completed' | 'failed' | 'aborted';
+  pauseRequestedAt?: string;
+  stopRequestedAt?: string;
+  stoppedAt?: string;
 }
 
 export interface AgentClusterCreationStage {
@@ -253,6 +417,21 @@ export interface AgentClusterManagerEdgeDraft {
   reason?: string;
 }
 
+export interface AgentClusterManagerWorkflowNodeDraft {
+  type: Exclude<WorkflowNodeType, 'agent' | 'review' | 'reduce'>;
+  name: string;
+  description?: string;
+  upstreamAgentNames?: string[];
+  downstreamAgentNames?: string[];
+  concurrency?: number;
+  joinMode?: WorkflowJoinMode;
+  minimumSuccess?: number;
+  gateKind?: WorkflowGateKind;
+  minimumCount?: number;
+  repeatCount?: number;
+  prompt?: string;
+}
+
 export interface AgentClusterManagerProposal {
   proposalId: string;
   reply: string;
@@ -260,6 +439,7 @@ export interface AgentClusterManagerProposal {
   promptPatches: AgentClusterManagerPromptPatchDraft[];
   agentDrafts: AgentClusterManagerAgentDraft[];
   edgeDrafts: AgentClusterManagerEdgeDraft[];
+  workflowNodeDrafts?: AgentClusterManagerWorkflowNodeDraft[];
   sharedContextSummary?: string;
   recommendedResumeFromAgentId?: string | null;
   recommendedResumeFromAgentName?: string | null;
@@ -316,6 +496,8 @@ export interface AgentCluster {
   agents: ClusterAgent[];
   edges: AgentEdge[];
   executionGraph?: AgentClusterExecutionGraph;
+  workflows?: AgentClusterWorkflow[];
+  currentWorkflowId?: string | null;
   orchestrationConfirmedAt?: string | null;
   messages: AgentMessage[];
   runs?: AgentClusterRun[];
@@ -342,6 +524,16 @@ export interface CreateAgentClusterRequest {
   };
   baseProviderAccountId?: string;
   requestId?: string;
+}
+
+export interface CreateAgentClusterAgentRequest {
+  name: string;
+  role: string;
+  description?: string;
+  systemPrompt?: string;
+  responsibilities?: string[];
+  tools?: string[];
+  capabilities?: string[];
 }
 
 export interface SendAgentClusterMessageRequest {

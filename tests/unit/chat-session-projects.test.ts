@@ -22,30 +22,30 @@ describe('chat session project assignments', () => {
 
   it('assigns a chat session to a project and persists it locally', () => {
     useChatStore.getState().assignSessionToProject('agent:main:session-1', {
-      projectKey: '/tmp/sample_research_project',
-      projectName: 'sample_research_project',
-      projectPath: '/tmp/sample_research_project',
+      projectKey: '/tmp/factor_mining_v1',
+      projectName: 'factor_mining_v1',
+      projectPath: '/tmp/factor_mining_v1',
     });
 
     expect(useChatStore.getState().sessionProjects['agent:main:session-1']).toEqual({
-      projectKey: '/tmp/sample_research_project',
-      projectName: 'sample_research_project',
-      projectPath: '/tmp/sample_research_project',
+      projectKey: '/tmp/factor_mining_v1',
+      projectName: 'factor_mining_v1',
+      projectPath: '/tmp/factor_mining_v1',
     });
     expect(JSON.parse(window.localStorage.getItem('investclaw:session-projects') || '{}')).toEqual({
       'agent:main:session-1': {
-        projectKey: '/tmp/sample_research_project',
-        projectName: 'sample_research_project',
-        projectPath: '/tmp/sample_research_project',
+        projectKey: '/tmp/factor_mining_v1',
+        projectName: 'factor_mining_v1',
+        projectPath: '/tmp/factor_mining_v1',
       },
     });
   });
 
   it('moves a chat session back to standalone conversations', () => {
     useChatStore.getState().assignSessionToProject('agent:main:session-1', {
-      projectKey: '/tmp/sample_research_project',
-      projectName: 'sample_research_project',
-      projectPath: '/tmp/sample_research_project',
+      projectKey: '/tmp/factor_mining_v1',
+      projectName: 'factor_mining_v1',
+      projectPath: '/tmp/factor_mining_v1',
     });
 
     useChatStore.getState().unassignSessionProject('agent:main:session-1');
@@ -56,9 +56,9 @@ describe('chat session project assignments', () => {
 
   it('moves every session in a project back with one persisted state update', () => {
     const project = {
-      projectKey: '/tmp/sample_research_project',
-      projectName: 'sample_research_project',
-      projectPath: '/tmp/sample_research_project',
+      projectKey: '/tmp/factor_mining_v1',
+      projectName: 'factor_mining_v1',
+      projectPath: '/tmp/factor_mining_v1',
     };
     useChatStore.getState().assignSessionToProject('agent:main:session-1', project);
     useChatStore.getState().assignSessionToProject('agent:main:session-2', project);

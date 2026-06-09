@@ -3,7 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 test.describe('InvestClaw Agent Cluster', () => {
-  test('creates a cluster from a new task and opens the graph detail view', async ({ page }) => {
+  test('creates a cluster from a new task and opens the concise workflow view', async ({ page }) => {
     await completeSetup(page);
 
     await page.getByTestId('sidebar-nav-agent-clusters').click();
@@ -23,11 +23,12 @@ test.describe('InvestClaw Agent Cluster', () => {
     await page.getByTestId('agent-cluster-create-button').click();
 
     await expect(page.getByTestId('agent-cluster-detail-page')).toBeVisible();
-    await expect(page.getByTestId('agent-cluster-graph')).toBeVisible();
-    await expect(page.getByTestId('agent-cluster-node-grid')).toHaveCSS('display', 'grid');
-    const graphNodes = page.locator('button[data-testid^="agent-graph-node-"]');
-    await expect(graphNodes.first()).toHaveCSS('overflow-wrap', 'anywhere');
-    const nodeBoxes = await graphNodes.evaluateAll((nodes) => nodes.map((node) => {
+    await expect(page.getByTestId('agent-cluster-workflow-editor')).toBeVisible();
+    await expect(page.getByTestId('agent-cluster-workflow-overview')).toBeVisible();
+    await expect(page.getByText(/Harness Workflow v1/)).toBeVisible();
+    const workflowAgents = page.locator('[data-testid^="workflow-agent-node-"]');
+    expect(await workflowAgents.count()).toBeGreaterThanOrEqual(4);
+    const nodeBoxes = await workflowAgents.evaluateAll((nodes) => nodes.map((node) => {
       const box = node.getBoundingClientRect();
       return { left: box.left, right: box.right, top: box.top, bottom: box.bottom };
     }));
@@ -42,27 +43,6 @@ test.describe('InvestClaw Agent Cluster', () => {
         expect(overlaps).toBe(false);
       }
     }
-    const descriptionPositions = await page.locator('[data-testid^="agent-graph-node-description-"]')
-      .evaluateAll((descriptions) => descriptions.map((description) => {
-        const node = description.closest('[data-testid^="agent-graph-node-"]');
-        const nodeBox = node?.getBoundingClientRect();
-        const descriptionBox = description.getBoundingClientRect();
-        return {
-          nodeTop: nodeBox?.top ?? 0,
-          descriptionTop: descriptionBox.top,
-        };
-      }));
-    const descriptionRows = new Map<number, number[]>();
-    for (const position of descriptionPositions) {
-      const rowKey = Math.round(position.nodeTop);
-      descriptionRows.set(rowKey, [...(descriptionRows.get(rowKey) ?? []), position.descriptionTop]);
-    }
-    for (const positions of descriptionRows.values()) {
-      if (positions.length < 2) continue;
-      expect(Math.max(...positions) - Math.min(...positions)).toBeLessThanOrEqual(1);
-    }
-    await expect(page.locator('[data-testid^="agent-graph-node-header-"]').first()).toHaveCSS('min-height', '68px');
-
     const sidebarMaterial = await page.getByTestId('sidebar').evaluate((element) => {
       const style = getComputedStyle(element);
       return {
@@ -124,11 +104,12 @@ test.describe('InvestClaw Agent Cluster', () => {
     await expect(page.getByText('流水线已确认').first()).toBeVisible();
     await page.getByTestId('agent-cluster-start-run').click();
     await expect(page.getByTestId('agent-cluster-run-monitor')).toBeVisible();
+    await expect(page.getByText(/Workflow v1/).first()).toBeVisible();
     await expect(page.getByText(/准备启动子会话|提交子会话/).first()).toBeVisible();
   });
 
   test('creates a project-folder cluster and supports renaming it', async ({ page, homeDir }) => {
-    const projectDir = join(homeDir, 'sample_research_project');
+    const projectDir = join(homeDir, 'factor_mining_v1');
     await mkdir(projectDir, { recursive: true });
     await writeFile(join(projectDir, 'README.md'), '# Factor Mining\n\n6-step pipeline with Agent A/B/C/D.');
     await writeFile(join(projectDir, 'HANDOFF.MD'), 'Agent A 数据管家，Agent B 因子生成器，Agent C 评估审计官，Agent D 研究馆员。');
@@ -155,9 +136,14 @@ test.describe('InvestClaw Agent Cluster', () => {
     await expect(page.getByTestId('sidebar-section-agent-clusters')).toBeVisible();
     await expect(page.getByTestId('sidebar-section-project-folders')).toBeVisible();
     await expect(page.getByTestId('sidebar-section-unfiled-chats')).toBeVisible();
-    await expect(page.locator('[data-testid^="sidebar-project-folder-"]').first()).toContainText('sample_research_project');
-    await expect(page.getByText('sample_research_project').first()).toBeVisible();
+    await expect(page.locator('[data-testid^="sidebar-project-folder-"]').first()).toContainText('factor_mining_v1');
+    await expect(page.getByText('factor_mining_v1').first()).toBeVisible();
     await expect(page.getByRole('heading', { name: '集群1' })).toBeVisible();
+    const sidebarCluster = page.locator('[data-testid^="sidebar-agent-cluster-"]').first();
+    await sidebarCluster.hover();
+    await page.locator('[data-testid^="sidebar-agent-cluster-pin-"]').click();
+    await page.reload();
+    await expect(page.locator('[data-testid^="sidebar-agent-cluster-pin-"]').first()).toHaveAttribute('aria-label', 'Unpin cluster');
 
     await page.getByTestId('sidebar-section-agent-clusters-toggle').click();
     await expect(page.locator('[data-testid^="sidebar-agent-cluster-"]')).toHaveCount(0);
@@ -175,7 +161,7 @@ test.describe('InvestClaw Agent Cluster', () => {
     await expect(page.locator('[data-testid^="sidebar-project-folder-"]')).toHaveCount(0);
     await expect(page.locator('[data-testid^="sidebar-agent-cluster-"]').first()).toContainText('集群1');
     await page.getByTestId('sidebar-restore-project-folders').click();
-    await expect(page.locator('[data-testid^="sidebar-project-folder-"]').first()).toContainText('sample_research_project');
+    await expect(page.locator('[data-testid^="sidebar-project-folder-"]').first()).toContainText('factor_mining_v1');
 
     await page.getByLabel('重命名集群').click();
     await page.locator('input[value="集群1"]').fill('因子研究集群');

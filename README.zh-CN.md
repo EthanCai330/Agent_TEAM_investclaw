@@ -23,7 +23,7 @@
   <img src="https://img.shields.io/badge/platform-MacOS%20%7C%20Windows%20%7C%20Linux-blue" alt="Platform" />
   <img src="https://img.shields.io/badge/electron-40+-47848F?logo=electron" alt="Electron" />
   <img src="https://img.shields.io/badge/react-19-61DAFB?logo=react" alt="React" />
-  <img src="https://img.shields.io/github/downloads/EthanCai330/InvestClaw/total?color=%23027DEB" alt="Downloads" />
+  <img src="https://img.shields.io/github/downloads/EthanCai330/Agent_TEAM_investclaw/total?color=%23027DEB" alt="Downloads" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
 </p>
 
@@ -61,32 +61,12 @@ InvestClaw 内置运行时能力、多模型配置、文档处理技能和桌面
 
 <p align="center">
   <strong>单独对话</strong><br>
-  <img src="resources/screenshot/zh/chat.png" style="width: 100%; height: auto;">
-</p>
-
-<p align="center">
-  <strong>定时任务</strong><br>
-  <img src="resources/screenshot/zh/cron.png" style="width: 100%; height: auto;">
-</p>
-
-<p align="center">
-  <strong>技能</strong><br>
-  <img src="resources/screenshot/zh/skills.png" style="width: 100%; height: auto;">
-</p>
-
-<p align="center">
-  <strong>频道</strong><br>
-  <img src="resources/screenshot/zh/channels.png" style="width: 100%; height: auto;">
-</p>
-
-<p align="center">
-  <strong>模型与 Provider</strong><br>
-  <img src="resources/screenshot/zh/models.png" style="width: 100%; height: auto;">
+  <img src="resources/screenshot/zh/chat.png" style="width: 100%; height: auto;" alt="单独对话">
 </p>
 
 <p align="center">
   <strong>设置</strong><br>
-  <img src="resources/screenshot/zh/settings.png" style="width: 100%; height: auto;">
+  <img src="resources/screenshot/zh/settings.png" style="width: 100%; height: auto;" alt="设置">
 </p>
 
 ---
@@ -236,13 +216,13 @@ Skills 页面可展示来自多个运行时来源的技能（托管目录、work
 
 #### 预构建版本（推荐）
 
-从 [Releases](https://github.com/EthanCai330/InvestClaw/releases) 页面下载适用于你平台的最新版本。
+从 [Releases](https://github.com/EthanCai330/Agent_TEAM_investclaw/releases) 页面下载适用于你平台的最新版本。
 
 #### 从源码构建
 
 ```bash
 # 克隆仓库
-git clone https://github.com/EthanCai330/InvestClaw.git
+git clone https://github.com/EthanCai330/Agent_TEAM_investclaw.git
 cd InvestClaw
 
 # 初始化项目

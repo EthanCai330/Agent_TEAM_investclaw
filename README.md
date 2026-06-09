@@ -23,7 +23,7 @@
   <img src="https://img.shields.io/badge/platform-MacOS%20%7C%20Windows%20%7C%20Linux-blue" alt="Platform" />
   <img src="https://img.shields.io/badge/electron-40+-47848F?logo=electron" alt="Electron" />
   <img src="https://img.shields.io/badge/react-19-61DAFB?logo=react" alt="React" />
-  <img src="https://img.shields.io/github/downloads/EthanCai330/InvestClaw/total?color=%23027DEB" alt="Downloads" />
+  <img src="https://img.shields.io/github/downloads/EthanCai330/Agent_TEAM_investclaw/total?color=%23027DEB" alt="Downloads" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
 </p>
 
@@ -60,32 +60,7 @@ This repository is an Agent Cluster-focused community edition maintained by [Eth
 
 <p align="center">
   <strong>Standalone chat</strong><br>
-  <img src="resources/screenshot/en/chat.png" style="width: 100%; height: auto;">
-</p>
-
-<p align="center">
-  <strong>Scheduled tasks</strong><br>
-  <img src="resources/screenshot/en/cron.png" style="width: 100%; height: auto;">
-</p>
-
-<p align="center">
-  <strong>Skills</strong><br>
-  <img src="resources/screenshot/en/skills.png" style="width: 100%; height: auto;">
-</p>
-
-<p align="center">
-  <strong>Channels</strong><br>
-  <img src="resources/screenshot/en/channels.png" style="width: 100%; height: auto;">
-</p>
-
-<p align="center">
-  <strong>Models and providers</strong><br>
-  <img src="resources/screenshot/en/models.png" style="width: 100%; height: auto;">
-</p>
-
-<p align="center">
-  <strong>Settings</strong><br>
-  <img src="resources/screenshot/en/settings.png" style="width: 100%; height: auto;">
+  <img src="resources/screenshot/en/chat.png" style="width: 100%; height: auto;" alt="Standalone chat">
 </p>
 
 ---
@@ -236,13 +211,13 @@ In **Settings → General**, you can enable **Launch at system startup** so Inve
 
 #### Pre-built Releases (Recommended)
 
-Download the latest release for your platform from the [Releases](https://github.com/EthanCai330/InvestClaw/releases) page.
+Download the latest release for your platform from the [Releases](https://github.com/EthanCai330/Agent_TEAM_investclaw/releases) page.
 
 #### Build from Source
 
 ```bash
 # Clone the repository
-git clone https://github.com/EthanCai330/InvestClaw.git
+git clone https://github.com/EthanCai330/Agent_TEAM_investclaw.git
 cd InvestClaw
 
 # Initialize the project
