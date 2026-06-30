@@ -1,5 +1,6 @@
 import { proxyAwareFetch } from '../../utils/proxy-fetch';
 import { getProviderConfig } from '../../utils/provider-registry';
+import { normalizeOpenAiCompatibleBaseUrl } from './provider-url';
 
 type ValidationProfile =
   | 'openai-completions'
@@ -58,7 +59,7 @@ function resolveOpenAiProbeUrls(
 ): { modelsUrl: string; probeUrl: string } {
   const normalizedBase = normalizeBaseUrl(baseUrl);
   const endpointSuffixPattern = /(\/responses?|\/chat\/completions)$/;
-  const rootBase = normalizedBase.replace(endpointSuffixPattern, '');
+  const rootBase = normalizeOpenAiCompatibleBaseUrl(normalizedBase.replace(endpointSuffixPattern, ''));
   const modelsUrl = buildOpenAiModelsUrl(rootBase);
 
   if (apiProtocol === 'openai-responses') {
@@ -162,9 +163,9 @@ async function validateOpenAiCompatibleKey(
   const { modelsUrl, probeUrl } = resolveOpenAiProbeUrls(trimmedBaseUrl, apiProtocol);
   const modelsResult = await performProviderValidationRequest(providerType, modelsUrl, headers);
 
-  if (modelsResult.status === 404) {
+  if (modelsResult.status === 404 || modelsResult.status === 405) {
     console.log(
-      `[investclaw-validate] ${providerType} /models returned 404, falling back to ${apiProtocol} probe`,
+      `[investclaw-validate] ${providerType} /models returned ${modelsResult.status}, falling back to ${apiProtocol} probe`,
     );
     if (apiProtocol === 'openai-responses') {
       return await performResponsesProbe(providerType, probeUrl, headers);

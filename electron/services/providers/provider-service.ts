@@ -181,6 +181,19 @@ export class ProviderService {
       } else if (definition?.defaultModelId) {
         model = definition.defaultModelId;
       }
+      const modelId = model?.startsWith(`${key}/`) ? model.slice(key.length + 1) : model;
+      const providerModels = Array.isArray(entry.models)
+        ? (entry.models as Array<Record<string, unknown>>)
+        : [];
+      const modelEntry = modelId
+        ? providerModels.find((candidate) => candidate.id === modelId)
+        : undefined;
+      const contextWindow = typeof modelEntry?.contextWindow === 'number'
+        ? modelEntry.contextWindow
+        : undefined;
+      const maxTokens = typeof modelEntry?.maxTokens === 'number'
+        ? modelEntry.maxTokens
+        : undefined;
 
       const account: ProviderAccount = {
         id: key,
@@ -193,6 +206,8 @@ export class ProviderService {
           ? (entry.headers as Record<string, string>)
           : undefined),
         model,
+        contextWindow,
+        maxTokens,
         enabled: true,
         isDefault: false,
         createdAt: now,

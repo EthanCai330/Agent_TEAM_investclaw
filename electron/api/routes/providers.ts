@@ -20,6 +20,7 @@ import {
 import { validateApiKeyWithProvider } from '../../services/providers/provider-validation';
 import { getProviderService } from '../../services/providers/provider-service';
 import { providerAccountToConfig } from '../../services/providers/provider-store';
+import { normalizeProviderBaseUrl } from '../../services/providers/provider-url';
 import type { ProviderAccount } from '../../shared/providers/types';
 import { logger } from '../../utils/logger';
 
@@ -33,6 +34,56 @@ function hasObjectChanges<T extends Record<string, unknown>>(
   const keys = Object.keys(patch) as Array<keyof T>;
   if (keys.length === 0) return false;
   return keys.some((key) => JSON.stringify(existing[key]) !== JSON.stringify(patch[key]));
+}
+
+function normalizeProviderAccountInput(account: ProviderAccount): ProviderAccount {
+  return {
+    ...account,
+    baseUrl: normalizeProviderBaseUrl(
+      { type: account.vendorId, apiProtocol: account.apiProtocol },
+      account.baseUrl,
+      account.apiProtocol,
+    ),
+  };
+}
+
+function normalizeProviderAccountPatch(
+  existing: ProviderAccount,
+  patch: Partial<ProviderAccount> | undefined,
+): Partial<ProviderAccount> | undefined {
+  if (!patch) return patch;
+  if (!Object.prototype.hasOwnProperty.call(patch, 'baseUrl')) return patch;
+  return {
+    ...patch,
+    baseUrl: normalizeProviderBaseUrl(
+      { type: patch.vendorId ?? existing.vendorId, apiProtocol: patch.apiProtocol ?? existing.apiProtocol },
+      patch.baseUrl,
+      patch.apiProtocol ?? existing.apiProtocol,
+    ),
+  };
+}
+
+function normalizeLegacyProviderConfig(config: ProviderConfig): ProviderConfig {
+  return {
+    ...config,
+    baseUrl: normalizeProviderBaseUrl(config, config.baseUrl, config.apiProtocol),
+  };
+}
+
+function normalizeLegacyProviderPatch(
+  existing: ProviderConfig,
+  patch: Partial<ProviderConfig> | undefined,
+): Partial<ProviderConfig> | undefined {
+  if (!patch) return patch;
+  if (!Object.prototype.hasOwnProperty.call(patch, 'baseUrl')) return patch;
+  return {
+    ...patch,
+    baseUrl: normalizeProviderBaseUrl(
+      { type: patch.type ?? existing.type, apiProtocol: patch.apiProtocol ?? existing.apiProtocol },
+      patch.baseUrl,
+      patch.apiProtocol ?? existing.apiProtocol,
+    ),
+  };
 }
 
 export async function handleProviderRoutes(
@@ -63,7 +114,7 @@ export async function handleProviderRoutes(
   if (url.pathname === '/api/provider-accounts' && req.method === 'POST') {
     try {
       const body = await parseJsonBody<{ account: ProviderAccount; apiKey?: string }>(req);
-      const account = await providerService.createAccount(body.account, body.apiKey);
+      const account = await providerService.createAccount(normalizeProviderAccountInput(body.account), body.apiKey);
       await syncSavedProviderToRuntime(providerAccountToConfig(account), body.apiKey, ctx.gatewayManager);
       sendJson(res, 200, { success: true, account });
     } catch (error) {
@@ -109,12 +160,13 @@ export async function handleProviderRoutes(
         sendJson(res, 404, { success: false, error: 'Provider account not found' });
         return true;
       }
-      const hasPatchChanges = hasObjectChanges(existing as unknown as Record<string, unknown>, body.updates);
+      const updates = normalizeProviderAccountPatch(existing, body.updates);
+      const hasPatchChanges = hasObjectChanges(existing as unknown as Record<string, unknown>, updates);
       if (!hasPatchChanges && body.apiKey === undefined) {
         sendJson(res, 200, { success: true, noChange: true, account: existing });
         return true;
       }
-      const nextAccount = await providerService.updateAccount(accountId, body.updates, body.apiKey);
+      const nextAccount = await providerService.updateAccount(accountId, updates ?? {}, body.apiKey);
       await syncUpdatedProviderToRuntime(providerAccountToConfig(nextAccount), body.apiKey, ctx.gatewayManager);
       sendJson(res, 200, { success: true, account: nextAccount });
     } catch (error) {
@@ -193,7 +245,11 @@ export async function handleProviderRoutes(
       const provider = await providerService.getLegacyProvider(body.providerId);
       const providerType = provider?.type || body.providerId;
       const registryBaseUrl = getProviderConfig(providerType)?.baseUrl;
-      const resolvedBaseUrl = body.options?.baseUrl || provider?.baseUrl || registryBaseUrl;
+      const resolvedBaseUrl = normalizeProviderBaseUrl(
+        { type: providerType as ProviderConfig['type'], apiProtocol: body.options?.apiProtocol || provider?.apiProtocol },
+        body.options?.baseUrl || provider?.baseUrl || registryBaseUrl,
+        body.options?.apiProtocol || provider?.apiProtocol,
+      );
       const resolvedProtocol = body.options?.apiProtocol || provider?.apiProtocol;
       sendJson(res, 200, await validateApiKeyWithProvider(providerType, body.apiKey, { baseUrl: resolvedBaseUrl, apiProtocol: resolvedProtocol }));
     } catch (error) {
@@ -261,7 +317,7 @@ export async function handleProviderRoutes(
     logLegacyProviderRoute('POST /api/providers');
     try {
       const body = await parseJsonBody<{ config: ProviderConfig; apiKey?: string }>(req);
-      const config = body.config;
+      const config = normalizeLegacyProviderConfig(body.config);
       await providerService.saveLegacyProvider(config);
       if (body.apiKey !== undefined) {
         const trimmedKey = body.apiKey.trim();
@@ -305,12 +361,13 @@ export async function handleProviderRoutes(
         sendJson(res, 404, { success: false, error: 'Provider not found' });
         return true;
       }
-      const hasPatchChanges = hasObjectChanges(existing as unknown as Record<string, unknown>, body.updates);
+      const updates = normalizeLegacyProviderPatch(existing, body.updates);
+      const hasPatchChanges = hasObjectChanges(existing as unknown as Record<string, unknown>, updates);
       if (!hasPatchChanges && body.apiKey === undefined) {
         sendJson(res, 200, { success: true, noChange: true });
         return true;
       }
-      const nextConfig: ProviderConfig = { ...existing, ...body.updates, updatedAt: new Date().toISOString() };
+      const nextConfig: ProviderConfig = { ...existing, ...updates, updatedAt: new Date().toISOString() };
       await providerService.saveLegacyProvider(nextConfig);
       if (body.apiKey !== undefined) {
         const trimmedKey = body.apiKey.trim();

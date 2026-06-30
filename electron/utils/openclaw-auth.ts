@@ -683,6 +683,8 @@ interface RuntimeProviderConfigOverride {
   apiKeyEnv?: string;
   headers?: Record<string, string>;
   authHeader?: boolean;
+  compat?: Record<string, unknown>;
+  modelEntries?: AgentModelProviderEntry['models'];
 }
 
 type ProviderEntryBuildOptions = {
@@ -691,7 +693,9 @@ type ProviderEntryBuildOptions = {
   apiKeyEnv?: string;
   headers?: Record<string, string>;
   authHeader?: boolean;
+  compat?: Record<string, unknown>;
   modelIds?: string[];
+  modelEntries?: AgentModelProviderEntry['models'];
   includeRegistryModels?: boolean;
   mergeExistingModels?: boolean;
 };
@@ -749,7 +753,7 @@ function upsertOpenClawProviderEntry(
   const registryModels = options.includeRegistryModels
     ? ((getProviderConfig(provider)?.models ?? []).map((m) => ({ ...m })) as Array<Record<string, unknown>>)
     : [];
-  const runtimeModels = (options.modelIds ?? []).map((id) => ({ id, name: id }));
+  const runtimeModels = options.modelEntries ?? (options.modelIds ?? []).map((id) => ({ id, name: id }));
 
   const nextProvider: Record<string, unknown> = {
     ...existingProvider,
@@ -770,6 +774,7 @@ function upsertOpenClawProviderEntry(
   } else {
     delete nextProvider.authHeader;
   }
+  delete nextProvider.compat;
 
   providers[provider] = nextProvider;
   models.providers = providers;
@@ -825,7 +830,9 @@ export async function syncProviderConfigToOpenClaw(
         api: override.api,
         apiKeyEnv: override.apiKeyEnv,
         headers: override.headers,
+        compat: override.compat,
         modelIds: modelId ? [modelId] : [],
+        modelEntries: override.modelEntries,
       });
     }
 
@@ -886,7 +893,9 @@ export async function setOpenClawDefaultModelWithOverride(
         apiKeyEnv: override.apiKeyEnv,
         headers: override.headers,
         authHeader: override.authHeader,
+        compat: override.compat,
         modelIds: [modelId, ...fallbackModelIds],
+        modelEntries: override.modelEntries,
       });
     }
 
@@ -1156,11 +1165,26 @@ export async function syncSessionIdleMinutesToOpenClaw(): Promise<void> {
 type AgentModelProviderEntry = {
   baseUrl?: string;
   api?: string;
-  models?: Array<{ id: string; name: string }>;
+  models?: Array<{ id: string; name: string; contextWindow?: number; maxTokens?: number }>;
   apiKey?: string;
+  compat?: Record<string, unknown>;
   /** When true, pi-ai sends Authorization: Bearer instead of x-api-key */
   authHeader?: boolean;
 };
+
+const REQUIRED_MODEL_REGISTRY_AGENT_IDS = ['main', 'agent'];
+
+function includeRequiredModelRegistryAgents(agentIds: string[]): string[] {
+  return [...new Set([...agentIds, ...REQUIRED_MODEL_REGISTRY_AGENT_IDS])];
+}
+
+async function discoverModelRegistryAgentIds(): Promise<string[]> {
+  try {
+    return includeRequiredModelRegistryAgents(await listConfiguredAgentIds());
+  } catch {
+    return [...REQUIRED_MODEL_REGISTRY_AGENT_IDS];
+  }
+}
 
 async function updateModelsJsonProviderEntriesForAgents(
   agentIds: string[],
@@ -1191,13 +1215,14 @@ async function updateModelsJsonProviderEntriesForAgents(
 
     const mergedModels = (entry.models ?? []).map((m) => {
       const prev = existingModels.find((e) => e.id === m.id);
-      return prev ? { ...prev, id: m.id, name: m.name } : { ...m };
+      return prev ? { ...prev, ...m, id: m.id, name: m.name } : { ...m };
     });
 
     if (entry.baseUrl !== undefined) existing.baseUrl = entry.baseUrl;
     if (entry.api !== undefined) existing.api = entry.api;
     if (mergedModels.length > 0) existing.models = mergedModels;
     if (entry.apiKey !== undefined) existing.apiKey = entry.apiKey;
+    delete existing.compat;
     if (entry.authHeader !== undefined) existing.authHeader = entry.authHeader;
 
     providers[providerType] = existing;
@@ -1216,7 +1241,7 @@ export async function updateAgentModelProvider(
   providerType: string,
   entry: AgentModelProviderEntry,
 ): Promise<void> {
-  const agentIds = await discoverAgentIds();
+  const agentIds = await discoverModelRegistryAgentIds();
   await updateModelsJsonProviderEntriesForAgents(agentIds, providerType, entry);
 }
 

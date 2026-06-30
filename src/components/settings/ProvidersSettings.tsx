@@ -17,6 +17,7 @@ import {
   Copy,
   XCircle,
   ChevronDown,
+  Cpu,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -53,9 +54,12 @@ import { useSettingsStore } from '@/stores/settings';
 import { hostApiFetch } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
 
-const inputClasses = 'h-[44px] rounded-xl font-mono text-[13px] bg-[#eeece3] dark:bg-muted border-black/10 dark:border-white/10 focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:border-blue-500 shadow-sm transition-all text-foreground placeholder:text-foreground/40';
+const inputClasses = 'h-[44px] rounded-xl font-mono text-[13px] bg-card/70 border-border/70 focus-visible:ring-2 focus-visible:ring-primary/30 focus-visible:border-primary/70 shadow-inner shadow-foreground/[0.03] transition-all text-foreground placeholder:text-foreground/40';
 const labelClasses = 'text-[14px] text-foreground/80 font-bold';
+const recommendedContextWindow = 200000;
+const recommendedMaxTokens = 10000;
 type ArkMode = 'apikey' | 'codeplan';
+type SettingsT = (...args: Parameters<ReturnType<typeof useTranslation>['t']>) => string;
 
 function normalizeFallbackProviderIds(ids?: string[]): string[] {
   return Array.from(new Set((ids ?? []).filter(Boolean)));
@@ -129,6 +133,56 @@ function shouldShowUserAgentFieldForNewProvider(providerType: ProviderType | nul
   return providerType === 'custom';
 }
 
+function shouldShowTokenLimitFields(providerType: ProviderType | string | null | undefined): boolean {
+  return providerType === 'custom' || providerType === 'ollama';
+}
+
+function parseOptionalTokenLimit(value: string): number | undefined | null {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (!/^\d+$/.test(trimmed)) return null;
+  const parsed = Number(trimmed);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function validateTokenLimits(
+  contextWindowValue: string,
+  maxTokensValue: string,
+  t: SettingsT,
+): { contextWindow?: number; maxTokens?: number; error?: string } {
+  const contextWindow = parseOptionalTokenLimit(contextWindowValue);
+  const maxTokens = parseOptionalTokenLimit(maxTokensValue);
+  if (contextWindow === null || maxTokens === null) {
+    return { error: t('aiProviders.toast.invalidTokenLimit', 'Token limits must be positive integers.') };
+  }
+  if (contextWindow !== undefined && maxTokens !== undefined && maxTokens > contextWindow) {
+    return { error: t('aiProviders.toast.maxTokensExceedsContext', 'Max output tokens cannot exceed the context window.') };
+  }
+  return { contextWindow, maxTokens };
+}
+
+function formatTokenNumber(value: number): string {
+  return new Intl.NumberFormat().format(value);
+}
+
+function buildTokenBudgetHelp(contextWindow: number | undefined, maxTokens: number | undefined, t: SettingsT): string {
+  const effectiveContextWindow = contextWindow ?? recommendedContextWindow;
+  const effectiveMaxTokens = maxTokens ?? recommendedMaxTokens;
+  const inputBudget = Math.max(0, effectiveContextWindow - effectiveMaxTokens);
+  const baseHelp = t('aiProviders.dialog.tokenBudgetHelp', {
+    input: formatTokenNumber(inputBudget),
+    output: formatTokenNumber(effectiveMaxTokens),
+    total: formatTokenNumber(effectiveContextWindow),
+  });
+  if (contextWindow === undefined && maxTokens === undefined) {
+    return `${baseHelp} ${t('aiProviders.dialog.tokenBudgetDefaultHelp', 'Leave blank to use OpenClaw defaults. Recommended: 200000 / 10000.')}`;
+  }
+  if (effectiveContextWindow > recommendedContextWindow) {
+    return `${baseHelp} ${t('aiProviders.dialog.contextWindowWarning', 'Recommended context window is 200000 or lower.')}`;
+  }
+  return baseHelp;
+}
+
 function getAuthModeLabel(
   authMode: ProviderAccount['authMode'],
   t: (key: string) => string
@@ -188,6 +242,8 @@ export function ProvidersSettings() {
       authMode?: ProviderAccount['authMode'];
       apiProtocol?: ProviderAccount['apiProtocol'];
       headers?: Record<string, string>;
+      contextWindow?: number;
+      maxTokens?: number;
     }
   ) => {
     const vendor = vendorMap.get(type);
@@ -202,6 +258,8 @@ export function ProvidersSettings() {
         baseUrl: options?.baseUrl,
         apiProtocol: options?.apiProtocol,
         headers: options?.headers,
+        contextWindow: options?.contextWindow,
+        maxTokens: options?.maxTokens,
         model: options?.model,
         enabled: true,
         isDefault: false,
@@ -240,9 +298,9 @@ export function ProvidersSettings() {
   };
 
   return (
-    <div data-testid="providers-settings" className="space-y-6">
+    <div data-testid="providers-settings" className="zone-models space-y-6">
       <div className="flex items-center justify-between">
-        <h2 data-testid="providers-settings-title" className="text-3xl font-serif text-foreground font-normal tracking-tight" style={{ fontFamily: 'Georgia, Cambria, "Times New Roman", Times, serif' }}>
+        <h2 data-testid="providers-settings-title" className="text-3xl font-semibold tracking-[-0.035em] text-foreground">
           {t('aiProviders.title', 'AI Providers')}
         </h2>
         <Button data-testid="providers-add-button" onClick={() => setShowAddDialog(true)} className="rounded-full px-5 h-9 shadow-none font-medium text-[13px]">
@@ -252,17 +310,17 @@ export function ProvidersSettings() {
       </div>
 
       {loading ? (
-        <div className="flex items-center justify-center py-12 text-muted-foreground bg-black/5 dark:bg-white/5 rounded-3xl border border-transparent border-dashed">
+        <div className="soft-panel flex items-center justify-center rounded-3xl border-dashed py-12 text-muted-foreground">
           <Loader2 className="h-6 w-6 animate-spin" />
         </div>
       ) : displayProviders.length === 0 ? (
-        <div data-testid="providers-empty-state" className="flex flex-col items-center justify-center py-20 text-muted-foreground bg-black/5 dark:bg-white/5 rounded-3xl border border-transparent border-dashed">
+        <div data-testid="providers-empty-state" className="soft-panel flex flex-col items-center justify-center rounded-3xl border-dashed py-20 text-muted-foreground">
           <Key className="h-12 w-12 mb-4 opacity-50" />
           <h3 className="text-[15px] font-medium mb-1 text-foreground">{t('aiProviders.empty.title')}</h3>
           <p className="text-[13px] text-center mb-6 max-w-sm">
             {t('aiProviders.empty.desc')}
           </p>
-          <Button onClick={() => setShowAddDialog(true)} className="rounded-full px-6 h-10 bg-[#0a84ff] hover:bg-[#007aff] text-white">
+          <Button onClick={() => setShowAddDialog(true)} className="h-10 rounded-full px-6">
             <Plus className="h-4 w-4 mr-2" />
             {t('aiProviders.empty.cta')}
           </Button>
@@ -287,6 +345,8 @@ export function ProvidersSettings() {
                   if (payload.updates.apiProtocol !== undefined) updates.apiProtocol = payload.updates.apiProtocol;
                   if (payload.updates.headers !== undefined) updates.headers = payload.updates.headers;
                   if (payload.updates.model !== undefined) updates.model = payload.updates.model;
+                  if ('contextWindow' in payload.updates) updates.contextWindow = payload.updates.contextWindow;
+                  if ('maxTokens' in payload.updates) updates.maxTokens = payload.updates.maxTokens;
                   if (payload.updates.fallbackModels !== undefined) updates.fallbackModels = payload.updates.fallbackModels;
                   if (payload.updates.fallbackProviderIds !== undefined) {
                     updates.fallbackAccountIds = payload.updates.fallbackProviderIds;
@@ -360,6 +420,8 @@ function ProviderCard({
   const [apiProtocol, setApiProtocol] = useState<ProviderAccount['apiProtocol']>(account.apiProtocol || 'openai-completions');
   const [userAgent, setUserAgent] = useState(getUserAgentHeader(account.headers));
   const [modelId, setModelId] = useState(account.model || '');
+  const [contextWindow, setContextWindow] = useState(account.contextWindow?.toString() || '');
+  const [maxTokens, setMaxTokens] = useState(account.maxTokens?.toString() || '');
   const [fallbackModelsText, setFallbackModelsText] = useState(
     normalizeFallbackModels(account.fallbackModels).join('\n')
   );
@@ -384,8 +446,10 @@ function ProviderCard({
   const effectiveDocsUrl = account.vendorId === 'ark' && arkMode === 'codeplan'
     ? (typeInfo?.codePlanDocsUrl || providerDocsUrl)
     : providerDocsUrl;
-  const canEditModelConfig = Boolean(typeInfo?.showBaseUrl || showModelIdField);
   const showUserAgentField = shouldShowUserAgentField(account);
+  const showTokenLimitFields = shouldShowTokenLimitFields(account.vendorId);
+  const canEditModelConfig = Boolean(typeInfo?.showBaseUrl || showModelIdField || showTokenLimitFields);
+  const tokenLimitPreview = validateTokenLimits(contextWindow, maxTokens, t);
 
   useEffect(() => {
     if (isEditing) {
@@ -395,6 +459,8 @@ function ProviderCard({
       setApiProtocol(account.apiProtocol || 'openai-completions');
       setUserAgent(getUserAgentHeader(account.headers));
       setModelId(account.model || '');
+      setContextWindow(account.contextWindow?.toString() || '');
+      setMaxTokens(account.maxTokens?.toString() || '');
       setFallbackModelsText(normalizeFallbackModels(account.fallbackModels).join('\n'));
       setFallbackProviderIds(normalizeFallbackProviderIds(account.fallbackAccountIds));
       setArkMode(
@@ -407,7 +473,7 @@ function ProviderCard({
         ) ? 'codeplan' : 'apikey'
       );
     }
-  }, [isEditing, account.baseUrl, account.headers, account.fallbackModels, account.fallbackAccountIds, account.model, account.apiProtocol, account.vendorId, typeInfo?.codePlanPresetBaseUrl, typeInfo?.codePlanPresetModelId]);
+  }, [isEditing, account.baseUrl, account.headers, account.fallbackModels, account.fallbackAccountIds, account.model, account.contextWindow, account.maxTokens, account.apiProtocol, account.vendorId, typeInfo?.codePlanPresetBaseUrl, typeInfo?.codePlanPresetModelId]);
 
   const fallbackOptions = allProviders.filter((candidate) => candidate.account.id !== account.id);
 
@@ -457,6 +523,20 @@ function ProviderCard({
         if (showModelIdField && (modelId.trim() || undefined) !== (account.model || undefined)) {
           updates.model = modelId.trim() || undefined;
         }
+        if (showTokenLimitFields) {
+          const tokenLimits = validateTokenLimits(contextWindow, maxTokens, t);
+          if (tokenLimits.error) {
+            toast.error(tokenLimits.error);
+            setSaving(false);
+            return;
+          }
+          if (tokenLimits.contextWindow !== account.contextWindow) {
+            updates.contextWindow = tokenLimits.contextWindow;
+          }
+          if (tokenLimits.maxTokens !== account.maxTokens) {
+            updates.maxTokens = tokenLimits.maxTokens;
+          }
+        }
         const existingUserAgent = getUserAgentHeader(account.headers).trim();
         const nextUserAgent = userAgent.trim();
         if (nextUserAgent !== existingUserAgent) {
@@ -497,7 +577,7 @@ function ProviderCard({
   };
 
   const currentInputClasses = isDefault
-    ? "h-[40px] rounded-xl font-mono text-[13px] bg-white dark:bg-card border-black/10 dark:border-white/10 focus-visible:ring-2 focus-visible:ring-blue-500/50 shadow-sm"
+    ? "h-[40px] rounded-xl font-mono text-[13px] bg-white dark:bg-card border-black/10 dark:border-white/10 focus-visible:ring-2 focus-visible:ring-ring/30 shadow-sm"
     : inputClasses;
 
   const currentLabelClasses = isDefault ? "text-[13px] text-muted-foreground" : labelClasses;
@@ -507,7 +587,7 @@ function ProviderCard({
     <div
       data-testid={`provider-card-${account.id}`}
       className={cn(
-        "group flex flex-col p-4 rounded-2xl transition-all relative overflow-hidden hover:bg-black/5 dark:hover:bg-white/5",
+        "zone-hoverable group relative flex flex-col overflow-hidden rounded-2xl p-4 transition-all",
         isDefault
           ? "bg-black/[0.04] dark:bg-white/[0.06] border border-transparent"
           : "bg-transparent border border-transparent"
@@ -519,7 +599,7 @@ function ProviderCard({
             {getProviderIconUrl(account.vendorId) ? (
               <img src={getProviderIconUrl(account.vendorId)} alt={typeInfo?.name || account.vendorId} className={cn('h-5 w-5', shouldInvertInDark(account.vendorId) && 'dark:invert')} />
             ) : (
-              <span className="text-xl">{vendor?.icon || typeInfo?.icon || '⚙️'}</span>
+              <Cpu className="h-5 w-5 text-muted-foreground" aria-hidden="true" />
             )}
           </div>
           <div>
@@ -574,7 +654,7 @@ function ProviderCard({
               data-testid={`provider-set-default-${account.id}`}
               variant="ghost"
               size="icon"
-              className="h-8 w-8 rounded-full text-muted-foreground hover:text-blue-600 hover:bg-white dark:hover:bg-card shadow-sm"
+              className="h-8 w-8 rounded-full text-muted-foreground hover:bg-white hover:text-foreground dark:hover:bg-card shadow-sm"
                 onClick={onSetDefault}
                 title={t('aiProviders.card.setDefault')}
               >
@@ -613,7 +693,7 @@ function ProviderCard({
                 href={effectiveDocsUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-[12px] text-blue-500 hover:text-blue-600 font-medium inline-flex items-center gap-1"
+                className="inline-flex items-center gap-1 text-[12px] font-medium text-foreground/70 hover:text-foreground"
               >
                 {t('aiProviders.dialog.customDoc')}
                 <ExternalLink className="h-3 w-3" />
@@ -645,6 +725,39 @@ function ProviderCard({
                   />
                 </div>
               )}
+              {showTokenLimitFields && (
+                <div className="space-y-2 pt-2">
+                  <div className="grid gap-2 md:grid-cols-2">
+                    <div className="space-y-1.5">
+                      <Label className={currentLabelClasses}>{t('aiProviders.dialog.contextWindow')}</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        inputMode="numeric"
+                        value={contextWindow}
+                        onChange={(e) => setContextWindow(e.target.value)}
+                        placeholder={String(recommendedContextWindow)}
+                        className={currentInputClasses}
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className={currentLabelClasses}>{t('aiProviders.dialog.maxTokens')}</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        inputMode="numeric"
+                        value={maxTokens}
+                        onChange={(e) => setMaxTokens(e.target.value)}
+                        placeholder={String(recommendedMaxTokens)}
+                        className={currentInputClasses}
+                      />
+                    </div>
+                  </div>
+                  <p className={cn('text-[12px]', tokenLimitPreview.error ? 'text-red-500' : 'text-muted-foreground')}>
+                    {tokenLimitPreview.error || buildTokenBudgetHelp(tokenLimitPreview.contextWindow, tokenLimitPreview.maxTokens, t)}
+                  </p>
+                </div>
+              )}
               {account.vendorId === 'ark' && codePlanPreset && (
                 <div className="space-y-1.5 pt-2">
                   <div className="flex items-center justify-between gap-2">
@@ -654,7 +767,7 @@ function ProviderCard({
                         href={typeInfo.codePlanDocsUrl}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-[12px] text-blue-500 hover:text-blue-600 font-medium inline-flex items-center gap-1"
+                        className="inline-flex items-center gap-1 text-[12px] font-medium text-foreground/70 hover:text-foreground"
                       >
                         {t('aiProviders.dialog.codePlanDoc')}
                         <ExternalLink className="h-3 w-3" />
@@ -752,8 +865,8 @@ function ProviderCard({
                     onChange={(e) => setFallbackModelsText(e.target.value)}
                     placeholder={t('aiProviders.dialog.fallbackModelIdsPlaceholder')}
                     className={isDefault
-                      ? "min-h-24 w-full rounded-xl border border-black/10 dark:border-white/10 bg-white dark:bg-card px-3 py-2 text-[13px] font-mono outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 shadow-sm"
-                      : "min-h-24 w-full rounded-xl border border-black/10 dark:border-white/10 bg-[#eeece3] dark:bg-muted px-3 py-2 text-[13px] font-mono outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:border-blue-500 shadow-sm transition-all text-foreground placeholder:text-foreground/40"}
+                      ? "min-h-24 w-full rounded-xl border border-black/10 dark:border-white/10 bg-white dark:bg-card px-3 py-2 text-[13px] font-mono outline-none focus-visible:ring-2 focus-visible:ring-ring/30 shadow-sm"
+                      : "min-h-24 w-full rounded-xl border border-border/70 bg-card/70 px-3 py-2 text-[13px] font-mono text-foreground shadow-inner shadow-foreground/[0.03] outline-none transition-all placeholder:text-foreground/40 focus-visible:border-primary/70 focus-visible:ring-2 focus-visible:ring-primary/30"}
                   />
                   <p className="text-[12px] text-muted-foreground">
                     {t('aiProviders.dialog.fallbackModelIdsHelp')}
@@ -764,16 +877,16 @@ function ProviderCard({
                   {fallbackOptions.length === 0 ? (
                     <p className="text-[13px] text-muted-foreground">{t('aiProviders.dialog.noFallbackOptions')}</p>
                   ) : (
-                    <div className={cn("space-y-2 rounded-xl border border-black/10 dark:border-white/10 p-3 shadow-sm", isDefault ? "bg-white dark:bg-card" : "bg-[#eeece3] dark:bg-muted")}>
+                    <div className={cn("space-y-2 rounded-xl border border-border/70 p-3 shadow-inner shadow-foreground/[0.03]", isDefault ? "bg-card" : "bg-card/60")}>
                       {fallbackOptions.map((candidate) => (
                         <label key={candidate.account.id} className="flex items-center gap-3 text-[13px] cursor-pointer group/label">
                           <input
                             type="checkbox"
                             checked={fallbackProviderIds.includes(candidate.account.id)}
                             onChange={() => toggleFallbackProvider(candidate.account.id)}
-                            className="rounded border-black/20 dark:border-white/20 text-blue-500 focus:ring-blue-500/50"
+                            className="rounded border-black/20 text-foreground focus:ring-ring/30 dark:border-white/20"
                           />
-                          <span className="font-medium group-hover/label:text-blue-500 transition-colors">{candidate.account.label}</span>
+                          <span className="font-medium transition-colors group-hover/label:text-foreground">{candidate.account.label}</span>
                           <span className="text-[12px] text-muted-foreground">
                             {candidate.account.model || candidate.vendor?.name || candidate.account.vendorId}
                           </span>
@@ -808,7 +921,7 @@ function ProviderCard({
                   href={typeInfo.apiKeyUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-[13px] text-blue-500 hover:text-blue-600 hover:underline flex items-center gap-1"
+                  className="flex items-center gap-1 text-[13px] text-foreground/70 hover:text-foreground hover:underline"
                   tabIndex={-1}
                 >
                   {t('aiProviders.oauth.getApiKey')} <ExternalLink className="h-3 w-3" />
@@ -841,7 +954,7 @@ function ProviderCard({
                     "rounded-xl px-4 border-black/10 dark:border-white/10",
                     isDefault
                       ? "h-[40px] bg-white dark:bg-card hover:bg-black/5 dark:hover:bg-white/10"
-                      : "h-[44px] bg-[#eeece3] dark:bg-muted hover:bg-black/5 dark:hover:bg-white/10 shadow-sm"
+                      : "h-[44px] bg-card/70 shadow-inner shadow-foreground/[0.03] hover:bg-accent/50"
                   )}
                   disabled={
                     validating
@@ -851,10 +964,15 @@ function ProviderCard({
                       && (baseUrl.trim() || undefined) === (account.baseUrl || undefined)
                       && userAgent.trim() === getUserAgentHeader(account.headers).trim()
                       && (modelId.trim() || undefined) === (account.model || undefined)
+                      && (!showTokenLimitFields || (
+                        tokenLimitPreview.contextWindow === account.contextWindow
+                        && tokenLimitPreview.maxTokens === account.maxTokens
+                      ))
                       && fallbackModelsEqual(normalizeFallbackModels(fallbackModelsText.split('\n')), account.fallbackModels)
                       && fallbackProviderIdsEqual(fallbackProviderIds, account.fallbackAccountIds)
                     )
                     || Boolean(showModelIdField && !modelId.trim())
+                    || Boolean(showTokenLimitFields && tokenLimitPreview.error)
                   }
                 >
                   {validating || saving ? (
@@ -870,7 +988,7 @@ function ProviderCard({
                     "p-0 rounded-xl",
                     isDefault
                       ? "h-[40px] w-[40px] hover:bg-black/5 dark:hover:bg-white/10"
-                      : "h-[44px] w-[44px] bg-[#eeece3] dark:bg-muted border border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/10 shadow-sm text-muted-foreground hover:text-foreground"
+                      : "h-[44px] w-[44px] border border-border/70 bg-card/70 text-muted-foreground shadow-inner shadow-foreground/[0.03] hover:bg-accent/50 hover:text-foreground"
                   )}
                 >
                   <X className="h-4 w-4" />
@@ -901,6 +1019,8 @@ interface AddProviderDialogProps {
       authMode?: ProviderAccount['authMode'];
       apiProtocol?: ProviderAccount['apiProtocol'];
       headers?: Record<string, string>;
+      contextWindow?: number;
+      maxTokens?: number;
     }
   ) => Promise<void>;
   onValidateKey: (
@@ -925,6 +1045,8 @@ function AddProviderDialog({
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [modelId, setModelId] = useState('');
+  const [contextWindow, setContextWindow] = useState('');
+  const [maxTokens, setMaxTokens] = useState('');
   const [apiProtocol, setApiProtocol] = useState<ProviderAccount['apiProtocol']>('openai-completions');
   const [showAdvancedConfig, setShowAdvancedConfig] = useState(false);
   const [userAgent, setUserAgent] = useState('');
@@ -968,6 +1090,8 @@ function AddProviderDialog({
   const vendorMap = new Map(vendors.map((vendor) => [vendor.id, vendor]));
   const selectedVendor = selectedType ? vendorMap.get(selectedType) : undefined;
   const showUserAgentInAddDialog = shouldShowUserAgentFieldForNewProvider(selectedType);
+  const showTokenLimitFields = shouldShowTokenLimitFields(selectedType);
+  const tokenLimitPreview = validateTokenLimits(contextWindow, maxTokens, t);
   const preferredOAuthMode = selectedVendor?.supportedAuthModes.includes('oauth_browser')
     ? 'oauth_browser'
     : (selectedVendor?.supportedAuthModes.includes('oauth_device')
@@ -1187,6 +1311,14 @@ function AddProviderDialog({
         setSaving(false);
         return;
       }
+      const tokenLimits: { contextWindow?: number; maxTokens?: number; error?: string } = showTokenLimitFields
+        ? validateTokenLimits(contextWindow, maxTokens, t)
+        : {};
+      if (tokenLimits.error) {
+        setValidationError(tokenLimits.error);
+        setSaving(false);
+        return;
+      }
 
       await onAdd(
         selectedType,
@@ -1196,6 +1328,8 @@ function AddProviderDialog({
           baseUrl: baseUrl.trim() || undefined,
           apiProtocol: (selectedType === 'custom' || selectedType === 'ollama') ? apiProtocol : undefined,
           headers: userAgent.trim() ? { 'User-Agent': userAgent.trim() } : undefined,
+          contextWindow: tokenLimits.contextWindow,
+          maxTokens: tokenLimits.maxTokens,
           model: resolveProviderModelForSave(typeInfo, modelId, devModeUnlocked),
           authMode: useOAuthFlow ? (preferredOAuthMode || 'oauth_device') : selectedType === 'ollama'
             ? 'local'
@@ -1213,7 +1347,7 @@ function AddProviderDialog({
 
   return (
     <div data-testid="add-provider-dialog" className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-      <Card className="w-full max-w-2xl max-h-[90vh] flex flex-col rounded-3xl border-0 shadow-2xl bg-[#f3f1e9] dark:bg-card overflow-hidden">
+      <Card className="zone-models glass-shell flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-3xl">
         <CardHeader className="relative pb-2 shrink-0">
           <CardTitle className="text-2xl font-serif font-normal">{t('aiProviders.dialog.title')}</CardTitle>
           <CardDescription className="text-[15px] mt-1 text-foreground/70">
@@ -1241,17 +1375,19 @@ function AddProviderDialog({
                     setName(type.id === 'custom' ? t('aiProviders.custom') : type.name);
                     setBaseUrl(type.defaultBaseUrl || '');
                     setModelId(type.defaultModelId || '');
+                    setContextWindow('');
+                    setMaxTokens('');
                     setUserAgent('');
                     setShowAdvancedConfig(false);
                     setArkMode('apikey');
                   }}
-                  className="p-4 rounded-2xl border border-black/5 dark:border-white/5 hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-center group"
+                  className="zone-hoverable group rounded-2xl border border-black/5 p-4 text-center transition-colors dark:border-white/5"
                 >
                   <div className="h-12 w-12 mx-auto mb-3 flex items-center justify-center bg-black/5 dark:bg-white/5 rounded-xl shadow-sm border border-black/5 dark:border-white/5 group-hover:scale-105 transition-transform">
                     {getProviderIconUrl(type.id) ? (
                       <img src={getProviderIconUrl(type.id)} alt={type.name} className={cn('h-6 w-6', shouldInvertInDark(type.id) && 'dark:invert')} />
                     ) : (
-                      <span className="text-2xl">{type.icon}</span>
+                      <Cpu className="h-6 w-6 text-muted-foreground" aria-hidden="true" />
                     )}
                   </div>
                   <p className="font-medium text-[13px]">{type.id === 'custom' ? t('aiProviders.custom') : type.name}</p>
@@ -1265,23 +1401,25 @@ function AddProviderDialog({
                   {getProviderIconUrl(selectedType!) ? (
                     <img src={getProviderIconUrl(selectedType!)} alt={typeInfo?.name} className={cn('h-6 w-6', shouldInvertInDark(selectedType!) && 'dark:invert')} />
                   ) : (
-                    <span className="text-xl">{typeInfo?.icon}</span>
+                    <Cpu className="h-5 w-5 text-muted-foreground" aria-hidden="true" />
                   )}
                 </div>
                 <div>
                   <p className="font-semibold text-[15px]">{typeInfo?.id === 'custom' ? t('aiProviders.custom') : typeInfo?.name}</p>
                   <button
-                  onClick={() => {
-                    setSelectedType(null);
-                    setValidationError(null);
-                    setBaseUrl('');
-                    setModelId('');
-                    setUserAgent('');
-                    setShowAdvancedConfig(false);
-                    setArkMode('apikey');
-                  }}
-                  className="text-[13px] text-blue-500 hover:text-blue-600 font-medium"
-                >
+                    onClick={() => {
+                      setSelectedType(null);
+                      setValidationError(null);
+                      setBaseUrl('');
+                      setModelId('');
+                      setContextWindow('');
+                      setMaxTokens('');
+                      setUserAgent('');
+                      setShowAdvancedConfig(false);
+                      setArkMode('apikey');
+                    }}
+                    className="text-[13px] font-medium text-foreground/70 hover:text-foreground"
+                  >
                     {t('aiProviders.dialog.change')}
                   </button>
                   {effectiveDocsUrl && (
@@ -1291,7 +1429,7 @@ function AddProviderDialog({
                         href={effectiveDocsUrl}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-[13px] text-blue-500 hover:text-blue-600 font-medium inline-flex items-center gap-1"
+                        className="inline-flex items-center gap-1 text-[13px] font-medium text-foreground/70 hover:text-foreground"
                       >
                         {t('aiProviders.dialog.customDoc')}
                         <ExternalLink className="h-3 w-3" />
@@ -1316,7 +1454,7 @@ function AddProviderDialog({
 
                 {/* Auth mode toggle for providers supporting both */}
                 {isOAuth && supportsApiKey && (
-                  <div className="flex rounded-xl border border-black/10 dark:border-white/10 overflow-hidden text-[13px] font-medium shadow-sm bg-[#eeece3] dark:bg-muted p-1 gap-1">
+                  <div className="flex gap-1 overflow-hidden rounded-xl border border-border/70 bg-card/60 p-1 text-[13px] font-medium shadow-inner shadow-foreground/[0.03]">
                     <button
                       onClick={() => setAuthMode('oauth')}
                       className={cn(
@@ -1348,7 +1486,7 @@ function AddProviderDialog({
                           href={typeInfo.apiKeyUrl}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-[13px] text-blue-500 hover:text-blue-600 font-medium flex items-center gap-1"
+                          className="flex items-center gap-1 text-[13px] font-medium text-foreground/70 hover:text-foreground"
                           tabIndex={-1}
                         >
                           {t('aiProviders.oauth.getApiKey')} <ExternalLink className="h-3 w-3" />
@@ -1415,6 +1553,49 @@ function AddProviderDialog({
                     />
                   </div>
                 )}
+                {showTokenLimitFields && (
+                  <div className="space-y-2.5">
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="space-y-2.5">
+                        <Label htmlFor="contextWindow" className={labelClasses}>{t('aiProviders.dialog.contextWindow')}</Label>
+                        <Input
+                          data-testid="add-provider-context-window-input"
+                          id="contextWindow"
+                          type="number"
+                          min={1}
+                          inputMode="numeric"
+                          placeholder={String(recommendedContextWindow)}
+                          value={contextWindow}
+                          onChange={(e) => {
+                            setContextWindow(e.target.value);
+                            setValidationError(null);
+                          }}
+                          className={inputClasses}
+                        />
+                      </div>
+                      <div className="space-y-2.5">
+                        <Label htmlFor="maxTokens" className={labelClasses}>{t('aiProviders.dialog.maxTokens')}</Label>
+                        <Input
+                          data-testid="add-provider-max-tokens-input"
+                          id="maxTokens"
+                          type="number"
+                          min={1}
+                          inputMode="numeric"
+                          placeholder={String(recommendedMaxTokens)}
+                          value={maxTokens}
+                          onChange={(e) => {
+                            setMaxTokens(e.target.value);
+                            setValidationError(null);
+                          }}
+                          className={inputClasses}
+                        />
+                      </div>
+                    </div>
+                    <p className={cn('text-[12px]', tokenLimitPreview.error ? 'text-red-500' : 'text-muted-foreground')}>
+                      {tokenLimitPreview.error || buildTokenBudgetHelp(tokenLimitPreview.contextWindow, tokenLimitPreview.maxTokens, t)}
+                    </p>
+                  </div>
+                )}
                 {selectedType === 'ark' && codePlanPreset && (
                   <div className="space-y-2.5">
                     <div className="flex items-center justify-between gap-2">
@@ -1424,7 +1605,7 @@ function AddProviderDialog({
                           href={typeInfo.codePlanDocsUrl}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-[13px] text-blue-500 hover:text-blue-600 font-medium inline-flex items-center gap-1"
+                          className="inline-flex items-center gap-1 text-[13px] font-medium text-foreground/70 hover:text-foreground"
                           tabIndex={-1}
                         >
                           {t('aiProviders.dialog.codePlanDoc')}
@@ -1522,14 +1703,14 @@ function AddProviderDialog({
                 {/* Device OAuth Trigger — only shown when in OAuth mode */}
                 {useOAuthFlow && (
                   <div className="space-y-4 pt-2">
-                    <div className="rounded-xl bg-blue-500/10 border border-blue-500/20 p-5 text-center">
-                      <p className="text-[13px] font-medium text-blue-600 dark:text-blue-400 mb-4 block">
+                    <div className="rounded-xl border border-border/60 bg-card/70 p-5 text-center">
+                      <p className="mb-4 block text-[13px] font-medium text-foreground/70">
                         {t('aiProviders.oauth.loginPrompt')}
                       </p>
                       <Button
                         onClick={handleStartOAuth}
                         disabled={oauthFlowing}
-                        className="w-full rounded-full h-[42px] font-semibold bg-[#0a84ff] hover:bg-[#007aff] text-white shadow-sm"
+                        className="h-[42px] w-full rounded-full font-semibold"
                       >
                         {oauthFlowing ? (
                           <><Loader2 className="h-4 w-4 mr-2 animate-spin" />{t('aiProviders.oauth.waiting')}</>
@@ -1543,7 +1724,7 @@ function AddProviderDialog({
                     {oauthFlowing && (
                       <div className="mt-4 p-5 border border-black/10 dark:border-white/10 rounded-2xl bg-white dark:bg-card shadow-sm relative overflow-hidden">
                         {/* Background pulse effect */}
-                        <div className="absolute inset-0 bg-blue-500/5 animate-pulse" />
+                        <div className="absolute inset-0 bg-primary/5" />
 
                         <div className="relative z-10 flex flex-col items-center justify-center text-center space-y-5">
                           {oauthError ? (
@@ -1557,8 +1738,8 @@ function AddProviderDialog({
                             </div>
                           ) : !oauthData ? (
                             <div className="space-y-4 py-6">
-                              <Loader2 className="h-10 w-10 animate-spin text-blue-500 mx-auto" />
-                              <p className="text-[13px] font-medium text-muted-foreground animate-pulse">{t('aiProviders.oauth.requestingCode')}</p>
+                              <Loader2 className="mx-auto h-10 w-10 animate-spin text-muted-foreground" />
+                              <p className="text-[13px] font-medium text-muted-foreground">{t('aiProviders.oauth.requestingCode')}</p>
                             </div>
                           ) : oauthData.mode === 'manual' ? (
                             <div className="space-y-4 w-full">
@@ -1586,7 +1767,7 @@ function AddProviderDialog({
                               />
 
                               <Button
-                                className="w-full rounded-full h-[42px] font-semibold bg-[#0a84ff] hover:bg-[#007aff] text-white"
+                                className="h-[42px] w-full rounded-full font-semibold"
                                 onClick={handleSubmitManualOAuthCode}
                                 disabled={!manualCodeInput.trim()}
                               >
@@ -1608,7 +1789,7 @@ function AddProviderDialog({
                                 </div>
                               </div>
 
-                              <div className="flex items-center justify-center gap-3 p-4 bg-[#eeece3] dark:bg-muted border border-black/5 dark:border-white/5 rounded-xl shadow-inner">
+                              <div className="flex items-center justify-center gap-3 rounded-xl border border-border/60 bg-card/50 p-4 shadow-inner shadow-foreground/[0.03]">
                                 <code className="text-3xl font-mono tracking-[0.2em] font-bold text-foreground">
                                   {oauthData.userCode}
                                 </code>
@@ -1635,7 +1816,7 @@ function AddProviderDialog({
                               </Button>
 
                               <div className="flex items-center justify-center gap-2 text-[13px] font-medium text-muted-foreground pt-2">
-                                <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
+                                <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
                                 <span>{t('aiProviders.oauth.waitingApproval')}</span>
                               </div>
 
@@ -1656,8 +1837,8 @@ function AddProviderDialog({
               <div className="flex justify-end gap-3">
                 <Button
                   onClick={handleAdd}
-                  className={cn("rounded-full px-8 h-[42px] text-[13px] font-semibold bg-[#0a84ff] hover:bg-[#007aff] text-white shadow-sm", useOAuthFlow && "hidden")}
-                  disabled={!selectedType || saving || (showModelIdField && modelId.trim().length === 0)}
+                  className={cn("h-[42px] rounded-full px-8 text-[13px] font-semibold", useOAuthFlow && "hidden")}
+                  disabled={!selectedType || saving || (showModelIdField && modelId.trim().length === 0) || Boolean(showTokenLimitFields && tokenLimitPreview.error)}
                 >
                   {saving ? (
                     <Loader2 className="h-4 w-4 animate-spin mr-2" />

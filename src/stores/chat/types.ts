@@ -17,6 +17,9 @@ export interface RawMessage {
   toolName?: string;
   details?: unknown;
   isError?: boolean;
+  sourceSessionKey?: string;
+  responderAgentId?: string;
+  targetAgentId?: string;
   /** Local-only: file metadata for user-uploaded attachments (not sent to/from Gateway) */
   _attachedFiles?: AttachedFileMeta[];
 }
@@ -45,6 +48,20 @@ export interface ChatSession {
   thinkingLevel?: string;
   model?: string;
   updatedAt?: number;
+}
+
+export interface SessionProjectAssignment {
+  projectKey: string;
+  projectName: string;
+  projectPath?: string | null;
+}
+
+export interface ConversationThread {
+  conversationKey: string;
+  sessionKeysByAgentId: Record<string, string>;
+  responderAgentId: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface ToolStatus {
@@ -78,10 +95,15 @@ export interface ChatState {
   sessions: ChatSession[];
   currentSessionKey: string;
   currentAgentId: string;
+  currentConversationKey: string;
+  currentResponderAgentId: string;
+  conversationThreads: Record<string, ConversationThread>;
   /** First user message text per session key, used as display label */
   sessionLabels: Record<string, string>;
   /** Last message timestamp (ms) per session key, used for sorting */
   sessionLastActivity: Record<string, number>;
+  /** Local-only project grouping for sidebar organization */
+  sessionProjects: Record<string, SessionProjectAssignment>;
 
   // Thinking
   showThinking: boolean;
@@ -90,8 +112,14 @@ export interface ChatState {
   // Actions
   loadSessions: () => Promise<void>;
   switchSession: (key: string) => void;
+  switchAgent: (agentId: string) => void;
+  setCurrentResponderAgent: (agentId: string) => void;
   newSession: () => void;
   deleteSession: (key: string) => Promise<void>;
+  renameSession: (key: string, label: string) => void;
+  assignSessionToProject: (key: string, project: SessionProjectAssignment) => void;
+  unassignSessionProject: (key: string) => void;
+  unassignSessionsFromProject: (projectKey: string) => void;
   cleanupEmptySession: () => void;
   loadHistory: (quiet?: boolean) => Promise<void>;
   sendMessage: (

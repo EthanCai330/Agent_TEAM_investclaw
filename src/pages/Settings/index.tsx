@@ -1096,21 +1096,21 @@ export function Settings() {
               <div className="flex gap-4 pt-3">
                 <Button
                   variant="link"
-                  className="h-auto p-0 text-[14px] text-blue-500 hover:text-blue-600 font-medium"
+                  className="h-auto p-0 text-[14px] font-medium text-foreground/70 hover:text-foreground"
                   onClick={() => window.electron.openExternal('https://github.com/Arain-sh/InvestClaw#readme')}
                 >
                   {t('about.docs')}
                 </Button>
                 <Button
                   variant="link"
-                  className="h-auto p-0 text-[14px] text-blue-500 hover:text-blue-600 font-medium"
+                  className="h-auto p-0 text-[14px] font-medium text-foreground/70 hover:text-foreground"
                   onClick={() => window.electron.openExternal('https://github.com/Arain-sh/InvestClaw')}
                 >
                   {t('about.github')}
                 </Button>
                 <Button
                   variant="link"
-                  className="h-auto p-0 text-[14px] text-blue-500 hover:text-blue-600 font-medium"
+                  className="h-auto p-0 text-[14px] font-medium text-foreground/70 hover:text-foreground"
                   onClick={() => window.electron.openExternal('https://github.com/Arain-sh/InvestClaw/issues')}
                 >
                   {t('about.faq')}

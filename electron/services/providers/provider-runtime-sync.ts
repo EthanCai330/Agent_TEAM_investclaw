@@ -17,6 +17,7 @@ import {
 } from '../../utils/openclaw-auth';
 import { logger } from '../../utils/logger';
 import { listAgentsSnapshot } from '../../utils/agent-config';
+import { normalizeProviderBaseUrl } from './provider-url';
 
 const GOOGLE_OAUTH_RUNTIME_PROVIDER = 'google-gemini-cli';
 const GOOGLE_OAUTH_DEFAULT_MODEL_REF = `${GOOGLE_OAUTH_RUNTIME_PROVIDER}/gemini-3-pro-preview`;
@@ -29,36 +30,12 @@ type RuntimeProviderSyncContext = {
   api: string;
 };
 
-function normalizeProviderBaseUrl(
-  config: ProviderConfig,
-  baseUrl?: string,
-  apiProtocol?: string,
-): string | undefined {
-  if (!baseUrl) {
-    return undefined;
-  }
-
-  const normalized = baseUrl.trim().replace(/\/+$/, '');
-
-  if (config.type === 'minimax-portal' || config.type === 'minimax-portal-cn') {
-    return normalized.replace(/\/v1$/, '').replace(/\/anthropic$/, '').replace(/\/$/, '') + '/anthropic';
-  }
-
-  if (config.type === 'custom' || config.type === 'ollama') {
-    const protocol = apiProtocol || config.apiProtocol || 'openai-completions';
-    if (protocol === 'openai-responses') {
-      return normalized.replace(/\/responses?$/i, '');
-    }
-    if (protocol === 'openai-completions') {
-      return normalized.replace(/\/chat\/completions$/i, '');
-    }
-    if (protocol === 'anthropic-messages') {
-      return normalized.replace(/\/v1\/messages$/i, '').replace(/\/messages$/i, '');
-    }
-  }
-
-  return normalized;
-}
+type RuntimeModelEntry = {
+  id: string;
+  name: string;
+  contextWindow?: number;
+  maxTokens?: number;
+};
 
 function shouldUseExplicitDefaultOverride(config: ProviderConfig, runtimeProviderKey: string): boolean {
   return Boolean(config.baseUrl || config.apiProtocol || runtimeProviderKey !== config.type);
@@ -134,6 +111,17 @@ export function getProviderModelRef(config: ProviderConfig): string | undefined 
   return defaultModel.startsWith(`${providerKey}/`)
     ? defaultModel
     : `${providerKey}/${defaultModel}`;
+}
+
+function buildRuntimeModelEntry(modelId: string, config: ProviderConfig): RuntimeModelEntry {
+  const entry: RuntimeModelEntry = { id: modelId, name: modelId };
+  if (Number.isFinite(config.contextWindow) && config.contextWindow && config.contextWindow > 0) {
+    entry.contextWindow = Math.floor(config.contextWindow);
+  }
+  if (Number.isFinite(config.maxTokens) && config.maxTokens && config.maxTokens > 0) {
+    entry.maxTokens = Math.floor(config.maxTokens);
+  }
+  return entry;
 }
 
 export async function getProviderFallbackModelRefs(config: ProviderConfig): Promise<string[]> {
@@ -307,6 +295,7 @@ async function syncRuntimeProviderConfig(
     api: context.api,
     apiKeyEnv: context.meta?.apiKeyEnv,
     headers: config.headers ?? context.meta?.headers,
+    modelEntries: config.model ? [buildRuntimeModelEntry(config.model, config)] : undefined,
   });
 }
 
@@ -328,7 +317,7 @@ async function syncCustomProviderAgentModel(
   await updateAgentModelProvider(runtimeProviderKey, {
     baseUrl: normalizeProviderBaseUrl(config, config.baseUrl, config.apiProtocol || 'openai-completions'),
     api: config.apiProtocol || 'openai-completions',
-    models: modelId ? [{ id: modelId, name: modelId }] : [],
+    models: modelId ? [buildRuntimeModelEntry(modelId, config)] : [],
     apiKey: resolvedKey,
   });
 }
@@ -523,6 +512,7 @@ export async function syncUpdatedProviderToRuntime(
         baseUrl: normalizeProviderBaseUrl(config, config.baseUrl, config.apiProtocol || 'openai-completions'),
         api: config.apiProtocol || 'openai-completions',
         headers: config.headers,
+        modelEntries: config.model ? [buildRuntimeModelEntry(config.model, config)] : undefined,
       }, fallbackModels);
     }
   }
@@ -697,8 +687,9 @@ export async function syncDefaultProviderToRuntime(
     await updateAgentModelProvider(ock, {
       baseUrl: normalizeProviderBaseUrl(provider, provider.baseUrl, provider.apiProtocol || 'openai-completions'),
       api: provider.apiProtocol || 'openai-completions',
-      models: modelId ? [{ id: modelId, name: modelId }] : [],
+      models: modelId ? [buildRuntimeModelEntry(modelId, provider)] : [],
       apiKey: providerKey,
+      compat: buildProviderCompatOverride(provider, provider.apiProtocol || 'openai-completions'),
     });
   }
 

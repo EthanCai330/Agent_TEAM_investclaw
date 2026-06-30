@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'http';
+import { nativeTheme } from 'electron';
 import { applyProxySettings } from '../../main/proxy';
 import { syncLaunchAtStartupSettingFromStore } from '../../main/launch-at-startup';
 import { syncProxyConfigToOpenClaw } from '../../utils/openclaw-proxy';
@@ -30,6 +31,10 @@ function patchTouchesLaunchAtStartup(patch: Partial<AppSettings>): boolean {
   return Object.prototype.hasOwnProperty.call(patch, 'launchAtStartup');
 }
 
+function applyNativeTheme(theme: AppSettings['theme']): void {
+  nativeTheme.themeSource = theme;
+}
+
 export async function handleSettingsRoutes(
   req: IncomingMessage,
   res: ServerResponse,
@@ -53,6 +58,9 @@ export async function handleSettingsRoutes(
       }
       if (patchTouchesLaunchAtStartup(patch)) {
         await syncLaunchAtStartupSettingFromStore();
+      }
+      if (patch.theme) {
+        applyNativeTheme(patch.theme);
       }
       sendJson(res, 200, { success: true });
     } catch (error) {
@@ -89,6 +97,9 @@ export async function handleSettingsRoutes(
       if (key === 'launchAtStartup') {
         await syncLaunchAtStartupSettingFromStore();
       }
+      if (key === 'theme') {
+        applyNativeTheme(body.value as AppSettings['theme']);
+      }
       sendJson(res, 200, { success: true });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
@@ -101,6 +112,7 @@ export async function handleSettingsRoutes(
       await resetSettings();
       await handleProxySettingsChange(ctx);
       await syncLaunchAtStartupSettingFromStore();
+      applyNativeTheme((await getAllSettings()).theme);
       sendJson(res, 200, { success: true, settings: await getAllSettings() });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });

@@ -13,7 +13,7 @@ export function TitleBar() {
 
   if (platform === 'darwin') {
     // macOS: just a drag region, traffic lights are native
-    return <div className="drag-region h-10 shrink-0 border-b bg-background" />;
+    return <div data-testid="titlebar" className="native-window-material drag-region h-10 shrink-0 border-b" />;
   }
 
   // Linux keeps the native frame/title bar for better IME compatibility.
@@ -51,27 +51,27 @@ function WindowsTitleBar() {
   };
 
   return (
-    <div className="drag-region flex h-10 shrink-0 items-center justify-end border-b bg-background">
+    <div data-testid="titlebar" className="window-material drag-region relative z-20 flex h-10 shrink-0 items-center justify-end border-b">
 
       {/* Right: Window Controls */}
       <div className="no-drag flex h-full">
         <button
           onClick={handleMinimize}
-          className="flex h-full w-11 items-center justify-center text-muted-foreground hover:bg-accent transition-colors"
+          className="flex h-full w-11 items-center justify-center text-muted-foreground transition-colors hover:bg-accent/70 hover:text-foreground"
           title="Minimize"
         >
           <Minus className="h-4 w-4" />
         </button>
         <button
           onClick={handleMaximize}
-          className="flex h-full w-11 items-center justify-center text-muted-foreground hover:bg-accent transition-colors"
+          className="flex h-full w-11 items-center justify-center text-muted-foreground transition-colors hover:bg-accent/70 hover:text-foreground"
           title={maximized ? 'Restore' : 'Maximize'}
         >
           {maximized ? <Copy className="h-3.5 w-3.5" /> : <Square className="h-3.5 w-3.5" />}
         </button>
         <button
           onClick={handleClose}
-          className="flex h-full w-11 items-center justify-center text-muted-foreground hover:bg-red-500 hover:text-white transition-colors"
+          className="flex h-full w-11 items-center justify-center text-muted-foreground transition-colors hover:bg-destructive hover:text-destructive-foreground"
           title="Close"
         >
           <X className="h-4 w-4" />

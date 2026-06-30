@@ -2,7 +2,7 @@
  * Electron Main Process Entry
  * Manages window creation, system tray, and IPC handlers
  */
-import { app, BrowserWindow, nativeImage, session, shell } from 'electron';
+import { app, BrowserWindow, nativeImage, nativeTheme, session, shell } from 'electron';
 import type { Server } from 'node:http';
 import { join } from 'path';
 import { GatewayManager } from '../gateway/manager';
@@ -39,6 +39,11 @@ import { getSetting } from '../utils/store';
 import { ensureBuiltinSkillsInstalled, ensurePreinstalledSkillsInstalled } from '../utils/skill-config';
 import { ensureAllBundledPluginsInstalled } from '../utils/plugin-install';
 import { startHostApiServer } from '../api/server';
+import {
+  pumpReadyAgentClusterChildren,
+  recordAgentClusterRuntimeEvent,
+  recoverActiveAgentClusterRuns,
+} from '../utils/agent-clusters';
 import { HostEventBus } from '../api/event-bus';
 import { deviceOAuthManager } from '../utils/device-oauth';
 import { browserOAuthManager } from '../utils/browser-oauth';
@@ -120,6 +125,73 @@ let mainWindow: BrowserWindow | null = null;
 let gatewayManager!: GatewayManager;
 let clawHubService!: ClawHubService;
 let hostEventBus!: HostEventBus;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function compactAgentClusterUpdatePayload(payload: unknown): unknown {
+  if (!isRecord(payload) || !isRecord(payload.cluster)) return payload;
+  const cluster = payload.cluster;
+  const events = Array.isArray(cluster.events)
+    ? cluster.events.filter((event) => !isRecord(event) || event.display !== 'silent').slice(0, 120).map((event) => {
+        if (!isRecord(event)) return event;
+        const { raw: _raw, ...displayEvent } = event;
+        return displayEvent;
+      })
+    : cluster.events;
+  const agents = Array.isArray(cluster.agents)
+    ? cluster.agents.map((agent) => {
+        if (!isRecord(agent)) return agent;
+        const { systemPrompt: _systemPrompt, localContext, ...displayAgent } = agent;
+        if (!isRecord(localContext)) return displayAgent;
+        const {
+          systemPrompt: _localSystemPrompt,
+          assignedTasks: _assignedTasks,
+          privateMessages: _privateMessages,
+          receivedMessages: _receivedMessages,
+          workingMemory: _workingMemory,
+          ...displayLocalContext
+        } = localContext;
+        return { ...displayAgent, localContext: displayLocalContext };
+      })
+    : cluster.agents;
+  const sharedContext = isRecord(cluster.sharedContext)
+    ? (() => {
+        const {
+          originalInput: _originalInput,
+          decompositionPlan: _decompositionPlan,
+          managerProposals,
+          ...displayContext
+        } = cluster.sharedContext;
+        return {
+          ...displayContext,
+          managerProposals: Array.isArray(managerProposals)
+            ? managerProposals.map((proposal) => {
+                if (!isRecord(proposal)) return proposal;
+                const { raw: _raw, ...displayProposal } = proposal;
+                return displayProposal;
+              })
+            : managerProposals,
+        };
+      })()
+    : cluster.sharedContext;
+  const {
+    sourceContent: _sourceContent,
+    ...displayCluster
+  } = cluster;
+  return {
+    ...payload,
+    cluster: {
+      ...displayCluster,
+      agents,
+      events,
+      messages: Array.isArray(cluster.messages) ? cluster.messages.slice(-200) : cluster.messages,
+      runs: Array.isArray(cluster.runs) ? cluster.runs.slice(0, 10) : cluster.runs,
+      sharedContext,
+    },
+  };
+}
 let hostApiServer: Server | null = null;
 const mainWindowFocusState = createMainWindowFocusState();
 const quitLifecycleState = createQuitLifecycleState();
@@ -174,6 +246,10 @@ function createWindow(): BrowserWindow {
     },
     titleBarStyle: isMac ? 'hiddenInset' : useCustomTitleBar ? 'hidden' : 'default',
     trafficLightPosition: isMac ? { x: 16, y: 16 } : undefined,
+    transparent: isMac,
+    backgroundColor: isMac ? '#00000000' : undefined,
+    vibrancy: isMac ? 'sidebar' : undefined,
+    visualEffectState: isMac ? 'followWindow' : undefined,
     frame: isMac || !useCustomTitleBar,
     show: false,
   });
@@ -298,6 +374,8 @@ async function initialize(): Promise<void> {
     logger.info('Running in E2E mode: startup side effects minimized');
   }
 
+  nativeTheme.themeSource = await getSetting('theme');
+
   // Set application menu
   createMenu();
 
@@ -390,6 +468,9 @@ async function initialize(): Promise<void> {
       void ensureInvestClawContext().catch((error) => {
         logger.warn('Failed to re-merge InvestClaw context after gateway reconnect:', error);
       });
+      void recoverActiveAgentClusterRuns(gatewayManager, hostEventBus).catch((error) => {
+        logger.warn('Failed to recover active Agent Harness workflows:', error);
+      });
     }
   });
 
@@ -399,10 +480,24 @@ async function initialize(): Promise<void> {
 
   gatewayManager.on('notification', (notification) => {
     hostEventBus.emit('gateway:notification', notification);
+    void recordAgentClusterRuntimeEvent(notification, hostEventBus).then((cluster) => {
+      if (cluster?.activeRunId) {
+        void pumpReadyAgentClusterChildren(cluster.clusterId, cluster.activeRunId, gatewayManager, hostEventBus);
+      }
+    }).catch((error) => {
+      logger.warn('Failed to record agent cluster gateway notification:', error);
+    });
   });
 
   gatewayManager.on('chat:message', (data) => {
     hostEventBus.emit('gateway:chat-message', data);
+    void recordAgentClusterRuntimeEvent(data, hostEventBus).then((cluster) => {
+      if (cluster?.activeRunId) {
+        void pumpReadyAgentClusterChildren(cluster.clusterId, cluster.activeRunId, gatewayManager, hostEventBus);
+      }
+    }).catch((error) => {
+      logger.warn('Failed to record agent cluster chat message:', error);
+    });
   });
 
   gatewayManager.on('channel:status', (data) => {
@@ -521,6 +616,25 @@ if (gotTheLock) {
   gatewayManager = new GatewayManager();
   clawHubService = new ClawHubService();
   hostEventBus = new HostEventBus();
+  let pendingClusterPayload: unknown = null;
+  let clusterUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+  hostEventBus.on('agent-cluster:updated', (payload) => {
+    pendingClusterPayload = payload;
+    if (clusterUpdateTimer) return;
+    clusterUpdateTimer = setTimeout(() => {
+      clusterUpdateTimer = null;
+      const nextPayload = pendingClusterPayload;
+      pendingClusterPayload = null;
+      if (nextPayload && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('agent-cluster:updated', compactAgentClusterUpdatePayload(nextPayload));
+      }
+    }, 150);
+  });
+  hostEventBus.on('agent-cluster:creation-updated', (payload) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('agent-cluster:creation-updated', payload);
+    }
+  });
 
   // When a second instance is launched, focus the existing window instead.
   app.on('second-instance', () => {

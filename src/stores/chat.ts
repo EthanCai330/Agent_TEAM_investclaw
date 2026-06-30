@@ -6,7 +6,6 @@
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
 import { useGatewayStore } from './gateway';
-import { useAgentsStore } from './agents';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './chat/cron-session-utils';
 import {
   DEFAULT_CANONICAL_PREFIX,
@@ -14,16 +13,20 @@ import {
   type AttachedFileMeta,
   type ChatSession,
   type ChatState,
+  type ConversationThread,
   type ContentBlock,
   type RawMessage,
+  type SessionProjectAssignment,
   type ToolStatus,
 } from './chat/types';
 
 export type {
   AttachedFileMeta,
   ChatSession,
+  ConversationThread,
   ContentBlock,
   RawMessage,
+  SessionProjectAssignment,
   ToolStatus,
 } from './chat/types';
 
@@ -57,6 +60,108 @@ const HISTORY_LOAD_MIN_INTERVAL_MS = 800;
 const HISTORY_POLL_SILENCE_WINDOW_MS = 2_500;
 const CHAT_EVENT_DEDUPE_TTL_MS = 30_000;
 const _chatEventDedupe = new Map<string, number>();
+const SESSION_LABELS_STORAGE_KEY = 'investclaw:session-labels';
+const SESSION_PROJECTS_STORAGE_KEY = 'investclaw:session-projects';
+const CONVERSATION_THREADS_STORAGE_KEY = 'investclaw:chat-conversation-threads:v1';
+
+function loadPersistedSessionLabels(): Record<string, string> {
+  try {
+    if (typeof window === 'undefined') return {};
+    const raw = window.localStorage.getItem(SESSION_LABELS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, String(value)]))
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function persistSessionLabels(labels: Record<string, string>): void {
+  try {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(SESSION_LABELS_STORAGE_KEY, JSON.stringify(labels));
+    }
+  } catch {
+    // Local labels are best-effort UI state.
+  }
+}
+
+function loadPersistedSessionProjects(): Record<string, SessionProjectAssignment> {
+  try {
+    if (typeof window === 'undefined') return {};
+    const raw = window.localStorage.getItem(SESSION_PROJECTS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const entries: Array<[string, SessionProjectAssignment]> = [];
+    for (const [key, value] of Object.entries(parsed)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const record = value as Record<string, unknown>;
+      const projectKey = typeof record.projectKey === 'string' ? record.projectKey.trim() : '';
+      const projectName = typeof record.projectName === 'string' ? record.projectName.trim() : '';
+      if (!projectKey || !projectName) continue;
+      const projectPath = typeof record.projectPath === 'string' ? record.projectPath : null;
+      entries.push([key, { projectKey, projectName, projectPath }]);
+    }
+    return Object.fromEntries(entries);
+  } catch {
+    return {};
+  }
+}
+
+function persistSessionProjects(projects: Record<string, SessionProjectAssignment>): void {
+  try {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(SESSION_PROJECTS_STORAGE_KEY, JSON.stringify(projects));
+    }
+  } catch {
+    // Local project assignments are best-effort UI state.
+  }
+}
+
+function loadPersistedConversationThreads(): Record<string, ConversationThread> {
+  try {
+    if (typeof window === 'undefined') return {};
+    const raw = window.localStorage.getItem(CONVERSATION_THREADS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const entries: Array<[string, ConversationThread]> = [];
+    for (const [key, value] of Object.entries(parsed)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const record = value as Record<string, unknown>;
+      const conversationKey = typeof record.conversationKey === 'string' ? record.conversationKey : key;
+      const rawMap = record.sessionKeysByAgentId;
+      const sessionKeysByAgentId = rawMap && typeof rawMap === 'object' && !Array.isArray(rawMap)
+        ? Object.fromEntries(
+          Object.entries(rawMap).filter((entry): entry is [string, string] => (
+            typeof entry[0] === 'string' && typeof entry[1] === 'string'
+          )),
+        )
+        : {};
+      if (!conversationKey || Object.keys(sessionKeysByAgentId).length === 0) continue;
+      entries.push([conversationKey, {
+        conversationKey,
+        sessionKeysByAgentId,
+        responderAgentId: typeof record.responderAgentId === 'string' ? record.responderAgentId : 'main',
+        createdAt: typeof record.createdAt === 'number' ? record.createdAt : Date.now(),
+        updatedAt: typeof record.updatedAt === 'number' ? record.updatedAt : Date.now(),
+      }]);
+    }
+    return Object.fromEntries(entries);
+  } catch {
+    return {};
+  }
+}
+
+function persistConversationThreads(threads: Record<string, ConversationThread>): void {
+  try {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(CONVERSATION_THREADS_STORAGE_KEY, JSON.stringify(threads));
+    }
+  } catch {
+    // Conversation routing is recoverable from session keys.
+  }
+}
 
 function clearErrorRecoveryTimer(): void {
   if (_errorRecoveryTimer) {
@@ -192,6 +297,7 @@ function mimeFromExtension(filePath: string): string {
     'txt': 'text/plain',
     'csv': 'text/csv',
     'md': 'text/markdown',
+    'json': 'application/json',
     'rtf': 'application/rtf',
     'epub': 'application/epub+zip',
     // Archives
@@ -218,6 +324,17 @@ function mimeFromExtension(filePath: string): string {
   return map[ext] || 'application/octet-stream';
 }
 
+function isLikelyUsableLocalFilePath(filePath: string): boolean {
+  const trimmed = filePath.trim();
+  if (!trimmed) return false;
+  if (/[<>]/.test(trimmed)) return false;
+  if (/^https?:\/\//i.test(trimmed)) return false;
+  if (/^\/[^/\\]+$/u.test(trimmed)) return false;
+  if (/^~\/[^/\\]+$/u.test(trimmed)) return false;
+  if (/^[A-Za-z]:\\[^\\/:*?"<>|\r\n]+$/u.test(trimmed)) return false;
+  return /^(?:\/|~\/|[A-Za-z]:\\)/.test(trimmed);
+}
+
 /**
  * Extract raw file paths from message text.
  * Detects absolute paths (Unix: / or ~/, Windows: C:\ etc.) ending with common file extensions.
@@ -226,7 +343,7 @@ function mimeFromExtension(filePath: string): string {
 function extractRawFilePaths(text: string): Array<{ filePath: string; mimeType: string }> {
   const refs: Array<{ filePath: string; mimeType: string }> = [];
   const seen = new Set<string>();
-  const exts = 'png|jpe?g|gif|webp|bmp|avif|svg|pdf|docx?|xlsx?|pptx?|txt|csv|md|rtf|epub|zip|tar|gz|rar|7z|mp3|wav|ogg|aac|flac|m4a|mp4|mov|avi|mkv|webm|m4v';
+  const exts = 'png|jpe?g|gif|webp|bmp|avif|svg|pdf|docx?|xlsx?|pptx?|txt|csv|md|json|rtf|epub|zip|tar|gz|rar|7z|mp3|wav|ogg|aac|flac|m4a|mp4|mov|avi|mkv|webm|m4v';
   // Unix absolute paths (/... or ~/...) — lookbehind rejects mid-token slashes
   // (e.g. "path/to/file.mp4", "https://example.com/file.mp4")
   const unixRegex = new RegExp(`(?<![\\w./:])((?:\\/|~\\/)[^\\s\\n"'()\\[\\],<>]*?\\.(?:${exts}))`, 'gi');
@@ -236,7 +353,7 @@ function extractRawFilePaths(text: string): Array<{ filePath: string; mimeType: 
     let match;
     while ((match = regex.exec(text)) !== null) {
       const p = match[1];
-      if (p && !seen.has(p)) {
+      if (p && isLikelyUsableLocalFilePath(p) && !seen.has(p)) {
         seen.add(p);
         refs.push({ filePath: p, mimeType: mimeFromExtension(p) });
       }
@@ -655,15 +772,77 @@ function normalizeAgentId(value: string | undefined | null): string {
   return (value ?? '').trim().toLowerCase() || 'main';
 }
 
-function buildFallbackMainSessionKey(agentId: string): string {
-  return `agent:${normalizeAgentId(agentId)}:main`;
+function getConversationKeyFromSessionKey(sessionKey: string): string {
+  if (!sessionKey.startsWith('agent:')) return sessionKey || 'main';
+  const parts = sessionKey.split(':');
+  return parts.slice(2).join(':') || 'main';
 }
 
-function resolveMainSessionKeyForAgent(agentId: string | undefined | null): string | null {
-  if (!agentId) return null;
+function buildSessionKeyForConversationAgent(conversationKey: string, agentId: string): string {
+  return `agent:${normalizeAgentId(agentId)}:${conversationKey || 'main'}`;
+}
+
+function getThreadSessionKey(thread: ConversationThread | undefined, conversationKey: string, agentId: string): string {
   const normalizedAgentId = normalizeAgentId(agentId);
-  const summary = useAgentsStore.getState().agents.find((agent) => agent.id === normalizedAgentId);
-  return summary?.mainSessionKey || buildFallbackMainSessionKey(normalizedAgentId);
+  return thread?.sessionKeysByAgentId[normalizedAgentId]
+    ?? buildSessionKeyForConversationAgent(conversationKey, normalizedAgentId);
+}
+
+function normalizeConversationThread(
+  sessionKey: string,
+  threads: Record<string, ConversationThread>,
+): ConversationThread {
+  const conversationKey = getConversationKeyFromSessionKey(sessionKey);
+  const agentId = getAgentIdFromSessionKey(sessionKey);
+  const existing = threads[conversationKey];
+  const now = Date.now();
+  return {
+    conversationKey,
+    sessionKeysByAgentId: {
+      ...(existing?.sessionKeysByAgentId ?? {}),
+      [agentId]: sessionKey,
+    },
+    responderAgentId: existing?.responderAgentId ?? agentId,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: Math.max(existing?.updatedAt ?? now, now),
+  };
+}
+
+function getConversationSessionKeys(
+  conversationKey: string,
+  sessions: ChatSession[],
+  threads: Record<string, ConversationThread>,
+  currentSessionKey?: string,
+): string[] {
+  const keys = new Set<string>();
+  for (const session of sessions) {
+    if (getConversationKeyFromSessionKey(session.key) === conversationKey) {
+      keys.add(session.key);
+    }
+  }
+  const thread = threads[conversationKey];
+  if (thread) {
+    for (const key of Object.values(thread.sessionKeysByAgentId)) {
+      keys.add(key);
+    }
+  }
+  if (currentSessionKey && getConversationKeyFromSessionKey(currentSessionKey) === conversationKey) {
+    keys.add(currentSessionKey);
+  }
+  if (keys.size === 0) {
+    keys.add(buildSessionKeyForConversationAgent(conversationKey, 'main'));
+  }
+  return [...keys];
+}
+
+function annotateConversationMessages(messages: RawMessage[], sessionKey: string): RawMessage[] {
+  const responderAgentId = getAgentIdFromSessionKey(sessionKey);
+  return messages.map((message) => ({
+    ...message,
+    sourceSessionKey: message.sourceSessionKey ?? sessionKey,
+    responderAgentId: message.responderAgentId ?? (message.role === 'assistant' ? responderAgentId : undefined),
+    targetAgentId: message.targetAgentId ?? (message.role === 'user' ? responderAgentId : undefined),
+  }));
 }
 
 function ensureSessionEntry(sessions: ChatSession[], sessionKey: string): ChatSession[] {
@@ -680,7 +859,7 @@ function clearSessionEntryFromMap<T extends Record<string, unknown>>(entries: T,
 function buildSessionSwitchPatch(
   state: Pick<
     ChatState,
-    'currentSessionKey' | 'messages' | 'sessions' | 'sessionLabels' | 'sessionLastActivity'
+    'currentSessionKey' | 'messages' | 'sessions' | 'sessionLabels' | 'sessionLastActivity' | 'sessionProjects' | 'conversationThreads'
   >,
   nextSessionKey: string,
 ): Partial<ChatState> {
@@ -695,10 +874,19 @@ function buildSessionSwitchPatch(
   const nextSessions = leavingEmpty
     ? state.sessions.filter((session) => session.key !== state.currentSessionKey)
     : state.sessions;
+  const nextThread = normalizeConversationThread(nextSessionKey, state.conversationThreads);
+  const nextThreads = {
+    ...state.conversationThreads,
+    [nextThread.conversationKey]: nextThread,
+  };
+  persistConversationThreads(nextThreads);
 
   return {
     currentSessionKey: nextSessionKey,
     currentAgentId: getAgentIdFromSessionKey(nextSessionKey),
+    currentConversationKey: nextThread.conversationKey,
+    currentResponderAgentId: nextThread.responderAgentId,
+    conversationThreads: nextThreads,
     sessions: ensureSessionEntry(nextSessions, nextSessionKey),
     sessionLabels: leavingEmpty
       ? clearSessionEntryFromMap(state.sessionLabels, state.currentSessionKey)
@@ -706,6 +894,9 @@ function buildSessionSwitchPatch(
     sessionLastActivity: leavingEmpty
       ? clearSessionEntryFromMap(state.sessionLastActivity, state.currentSessionKey)
       : state.sessionLastActivity,
+    sessionProjects: leavingEmpty
+      ? clearSessionEntryFromMap(state.sessionProjects, state.currentSessionKey)
+      : state.sessionProjects,
     messages: [],
     streamingText: '',
     streamingMessage: null,
@@ -1002,8 +1193,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   currentSessionKey: DEFAULT_SESSION_KEY,
   currentAgentId: 'main',
-  sessionLabels: {},
+  currentConversationKey: getConversationKeyFromSessionKey(DEFAULT_SESSION_KEY),
+  currentResponderAgentId: 'main',
+  conversationThreads: loadPersistedConversationThreads(),
+  sessionLabels: loadPersistedSessionLabels(),
   sessionLastActivity: {},
+  sessionProjects: loadPersistedSessionProjects(),
 
   showThinking: true,
   thinkingLevel: null,
@@ -1084,15 +1279,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
               .map((session) => [session.key, session.updatedAt!]),
           );
 
-          set((state) => ({
-            sessions: sessionsWithCurrent,
-            currentSessionKey: nextSessionKey,
-            currentAgentId: getAgentIdFromSessionKey(nextSessionKey),
-            sessionLastActivity: {
-              ...state.sessionLastActivity,
-              ...discoveredActivity,
-            },
-          }));
+          set((state) => {
+            const nextThread = normalizeConversationThread(nextSessionKey, state.conversationThreads);
+            const conversationThreads = {
+              ...state.conversationThreads,
+              [nextThread.conversationKey]: nextThread,
+            };
+            persistConversationThreads(conversationThreads);
+            return {
+              sessions: sessionsWithCurrent,
+              currentSessionKey: nextSessionKey,
+              currentAgentId: getAgentIdFromSessionKey(nextSessionKey),
+              currentConversationKey: nextThread.conversationKey,
+              currentResponderAgentId: nextThread.responderAgentId,
+              conversationThreads,
+              sessionLastActivity: {
+                ...state.sessionLastActivity,
+                ...discoveredActivity,
+              },
+            };
+          });
 
           if (currentSessionKey !== nextSessionKey) {
             void get().loadHistory();
@@ -1159,6 +1365,42 @@ export const useChatStore = create<ChatState>((set, get) => ({
     get().loadHistory();
   },
 
+  switchAgent: (agentId: string) => {
+    get().setCurrentResponderAgent(agentId);
+  },
+
+  setCurrentResponderAgent: (agentId: string) => {
+    const normalizedAgentId = normalizeAgentId(agentId);
+    set((state) => {
+      const conversationKey = state.currentConversationKey || getConversationKeyFromSessionKey(state.currentSessionKey);
+      const existingThread = normalizeConversationThread(state.currentSessionKey, state.conversationThreads);
+      const targetSessionKey = getThreadSessionKey(existingThread, conversationKey, normalizedAgentId);
+      const nextThread: ConversationThread = {
+        ...existingThread,
+        conversationKey,
+        responderAgentId: normalizedAgentId,
+        sessionKeysByAgentId: {
+          ...existingThread.sessionKeysByAgentId,
+          [normalizedAgentId]: targetSessionKey,
+        },
+        updatedAt: Date.now(),
+      };
+      const conversationThreads = {
+        ...state.conversationThreads,
+        [conversationKey]: nextThread,
+      };
+      persistConversationThreads(conversationThreads);
+      return {
+        currentSessionKey: targetSessionKey,
+        currentAgentId: normalizedAgentId,
+        currentResponderAgentId: normalizedAgentId,
+        currentConversationKey: conversationKey,
+        conversationThreads,
+        sessions: ensureSessionEntry(state.sessions, targetSessionKey),
+      };
+    });
+  },
+
   // ── Delete session ──
   //
   // NOTE: The OpenClaw Gateway does NOT expose a sessions.delete (or equivalent)
@@ -1193,32 +1435,97 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (currentSessionKey === key) {
       // Switched away from deleted session — pick the first remaining or create new
       const next = remaining[0];
-      set((s) => ({
-        sessions: remaining,
-        sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
-        sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
-        messages: [],
-        streamingText: '',
-        streamingMessage: null,
-        streamingTools: [],
-        activeRunId: null,
-        error: null,
-        pendingFinal: false,
-        lastUserMessageAt: null,
-        pendingToolImages: [],
-        currentSessionKey: next?.key ?? DEFAULT_SESSION_KEY,
-        currentAgentId: getAgentIdFromSessionKey(next?.key ?? DEFAULT_SESSION_KEY),
-      }));
+      set((s) => {
+        const sessionProjects = Object.fromEntries(Object.entries(s.sessionProjects).filter(([k]) => k !== key));
+        persistSessionProjects(sessionProjects);
+        return {
+          sessions: remaining,
+          sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
+          sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
+          sessionProjects,
+          messages: [],
+          streamingText: '',
+          streamingMessage: null,
+          streamingTools: [],
+          activeRunId: null,
+          error: null,
+          pendingFinal: false,
+          lastUserMessageAt: null,
+          pendingToolImages: [],
+          currentSessionKey: next?.key ?? DEFAULT_SESSION_KEY,
+          currentAgentId: getAgentIdFromSessionKey(next?.key ?? DEFAULT_SESSION_KEY),
+          currentConversationKey: getConversationKeyFromSessionKey(next?.key ?? DEFAULT_SESSION_KEY),
+          currentResponderAgentId: getAgentIdFromSessionKey(next?.key ?? DEFAULT_SESSION_KEY),
+        };
+      });
       if (next) {
         get().loadHistory();
       }
     } else {
-      set((s) => ({
-        sessions: remaining,
-        sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
-        sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
-      }));
+      set((s) => {
+        const sessionProjects = Object.fromEntries(Object.entries(s.sessionProjects).filter(([k]) => k !== key));
+        persistSessionProjects(sessionProjects);
+        return {
+          sessions: remaining,
+          sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
+          sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
+          sessionProjects,
+        };
+      });
     }
+  },
+
+  renameSession: (key: string, label: string) => {
+    const trimmed = label.trim();
+    set((state) => {
+      const sessionLabels = trimmed
+        ? { ...state.sessionLabels, [key]: trimmed.slice(0, 80) }
+        : Object.fromEntries(Object.entries(state.sessionLabels).filter(([entryKey]) => entryKey !== key));
+      persistSessionLabels(sessionLabels);
+      return { sessionLabels };
+    });
+  },
+
+  assignSessionToProject: (key: string, project: SessionProjectAssignment) => {
+    const projectKey = project.projectKey.trim();
+    const projectName = project.projectName.trim();
+    if (!projectKey || !projectName) return;
+    set((state) => {
+      const sessionProjects = {
+        ...state.sessionProjects,
+        [key]: {
+          projectKey,
+          projectName: projectName.slice(0, 120),
+          projectPath: project.projectPath ?? null,
+        },
+      };
+      persistSessionProjects(sessionProjects);
+      return { sessionProjects };
+    });
+  },
+
+  unassignSessionProject: (key: string) => {
+    set((state) => {
+      const sessionProjects = Object.fromEntries(
+        Object.entries(state.sessionProjects).filter(([entryKey]) => entryKey !== key),
+      );
+      persistSessionProjects(sessionProjects);
+      return { sessionProjects };
+    });
+  },
+
+  unassignSessionsFromProject: (projectKey: string) => {
+    const normalizedProjectKey = projectKey.trim();
+    if (!normalizedProjectKey) return;
+    set((state) => {
+      const sessionProjects = Object.fromEntries(
+        Object.entries(state.sessionProjects).filter(([, assignment]) => (
+          assignment.projectKey !== normalizedProjectKey
+        )),
+      );
+      persistSessionProjects(sessionProjects);
+      return { sessionProjects };
+    });
   },
 
   // ── New session ──
@@ -1238,30 +1545,47 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ?? getCanonicalPrefixFromSessions(sessions)
       ?? DEFAULT_CANONICAL_PREFIX;
     const newKey = `${prefix}:session-${Date.now()}`;
+    const newConversationKey = getConversationKeyFromSessionKey(newKey);
     const newSessionEntry: ChatSession = { key: newKey, displayName: newKey };
-    set((s) => ({
-      currentSessionKey: newKey,
-      currentAgentId: getAgentIdFromSessionKey(newKey),
-      sessions: [
-        ...(leavingEmpty ? s.sessions.filter((sess) => sess.key !== currentSessionKey) : s.sessions),
-        newSessionEntry,
-      ],
-      sessionLabels: leavingEmpty
-        ? Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== currentSessionKey))
-        : s.sessionLabels,
-      sessionLastActivity: leavingEmpty
-        ? Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey))
-        : s.sessionLastActivity,
-      messages: [],
-      streamingText: '',
-      streamingMessage: null,
-      streamingTools: [],
-      activeRunId: null,
-      error: null,
-      pendingFinal: false,
-      lastUserMessageAt: null,
-      pendingToolImages: [],
-    }));
+    set((s) => {
+      const sessionProjects = leavingEmpty
+        ? Object.fromEntries(Object.entries(s.sessionProjects).filter(([k]) => k !== currentSessionKey))
+        : s.sessionProjects;
+      if (leavingEmpty) persistSessionProjects(sessionProjects);
+      const nextThread = normalizeConversationThread(newKey, {});
+      const conversationThreads = {
+        ...s.conversationThreads,
+        [newConversationKey]: nextThread,
+      };
+      persistConversationThreads(conversationThreads);
+      return {
+        currentSessionKey: newKey,
+        currentAgentId: getAgentIdFromSessionKey(newKey),
+        currentConversationKey: newConversationKey,
+        currentResponderAgentId: getAgentIdFromSessionKey(newKey),
+        conversationThreads,
+        sessions: [
+          ...(leavingEmpty ? s.sessions.filter((sess) => sess.key !== currentSessionKey) : s.sessions),
+          newSessionEntry,
+        ],
+        sessionLabels: leavingEmpty
+          ? Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== currentSessionKey))
+          : s.sessionLabels,
+        sessionLastActivity: leavingEmpty
+          ? Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey))
+          : s.sessionLastActivity,
+        sessionProjects,
+        messages: [],
+        streamingText: '',
+        streamingMessage: null,
+        streamingTools: [],
+        activeRunId: null,
+        error: null,
+        pendingFinal: false,
+        lastUserMessageAt: null,
+        pendingToolImages: [],
+      };
+    });
   },
 
   // ── Cleanup empty session on navigate away ──
@@ -1279,28 +1603,37 @@ export const useChatStore = create<ChatState>((set, get) => ({
       && !sessionLastActivity[currentSessionKey]
       && !sessionLabels[currentSessionKey];
     if (!isEmptyNonMain) return;
-    set((s) => ({
-      sessions: s.sessions.filter((sess) => sess.key !== currentSessionKey),
-      sessionLabels: Object.fromEntries(
-        Object.entries(s.sessionLabels).filter(([k]) => k !== currentSessionKey),
-      ),
-      sessionLastActivity: Object.fromEntries(
-        Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey),
-      ),
-    }));
+    set((s) => {
+      const sessionProjects = Object.fromEntries(
+        Object.entries(s.sessionProjects).filter(([k]) => k !== currentSessionKey),
+      );
+      persistSessionProjects(sessionProjects);
+      return {
+        sessions: s.sessions.filter((sess) => sess.key !== currentSessionKey),
+        sessionLabels: Object.fromEntries(
+          Object.entries(s.sessionLabels).filter(([k]) => k !== currentSessionKey),
+        ),
+        sessionLastActivity: Object.fromEntries(
+          Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey),
+        ),
+        sessionProjects,
+      };
+    });
   },
 
   // ── Load chat history ──
 
   loadHistory: async (quiet = false) => {
-    const { currentSessionKey } = get();
-    const existingLoad = _historyLoadInFlight.get(currentSessionKey);
+    const { currentSessionKey, currentConversationKey } = get();
+    const conversationKey = currentConversationKey || getConversationKeyFromSessionKey(currentSessionKey);
+    const loadKey = `conversation:${conversationKey}`;
+    const existingLoad = _historyLoadInFlight.get(loadKey);
     if (existingLoad) {
       await existingLoad;
       return;
     }
 
-    const lastLoadAt = _lastHistoryLoadAtBySession.get(currentSessionKey) || 0;
+    const lastLoadAt = _lastHistoryLoadAtBySession.get(loadKey) || 0;
     if (quiet && Date.now() - lastLoadAt < HISTORY_LOAD_MIN_INTERVAL_MS) {
       return;
     }
@@ -1320,7 +1653,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Guard: if the user switched sessions while this async load was in
       // flight, discard the result to prevent overwriting the new session's
       // messages with stale data from the old session.
-      if (get().currentSessionKey !== currentSessionKey) return;
+      if ((get().currentConversationKey || getConversationKeyFromSessionKey(get().currentSessionKey)) !== conversationKey) return;
 
       // Before filtering: attach images/files from tool_result messages to the next assistant message
       const messagesWithToolImages = enrichWithToolResultFiles(rawMessages);
@@ -1428,22 +1761,55 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
 
       try {
-        const data = await useGatewayStore.getState().rpc<Record<string, unknown>>(
-          'chat.history',
-          { sessionKey: currentSessionKey, limit: 200 },
+        const state = get();
+        const sessionKeys = getConversationSessionKeys(
+          conversationKey,
+          state.sessions,
+          state.conversationThreads,
+          currentSessionKey,
         );
-        if (data) {
-          let rawMessages = Array.isArray(data.messages) ? data.messages as RawMessage[] : [];
-          const thinkingLevel = data.thinkingLevel ? String(data.thinkingLevel) : null;
-          if (rawMessages.length === 0 && isCronSessionKey(currentSessionKey)) {
-            rawMessages = await loadCronFallbackMessages(currentSessionKey, 200);
-          }
+        const histories = await Promise.all(
+          sessionKeys.map(async (sessionKey) => {
+            try {
+              const data = await useGatewayStore.getState().rpc<Record<string, unknown>>(
+                'chat.history',
+                { sessionKey, limit: 200 },
+              );
+              let rawMessages = data && Array.isArray(data.messages) ? data.messages as RawMessage[] : [];
+              if (rawMessages.length === 0 && isCronSessionKey(sessionKey)) {
+                rawMessages = await loadCronFallbackMessages(sessionKey, 200);
+              }
+              return {
+                sessionKey,
+                messages: annotateConversationMessages(rawMessages, sessionKey),
+                thinkingLevel: data?.thinkingLevel ? String(data.thinkingLevel) : null,
+              };
+            } catch (error) {
+              console.warn(`Failed to load chat history for ${sessionKey}:`, error);
+              const fallback = await loadCronFallbackMessages(sessionKey, 200);
+              return {
+                sessionKey,
+                messages: annotateConversationMessages(fallback, sessionKey),
+                thinkingLevel: null,
+              };
+            }
+          }),
+        );
+        const rawMessages = histories
+          .flatMap((history) => history.messages)
+          .sort((a, b) => {
+            const byTime = (a.timestamp ? toMs(a.timestamp) : 0) - (b.timestamp ? toMs(b.timestamp) : 0);
+            if (byTime !== 0) return byTime;
+            return String(a.sourceSessionKey ?? '').localeCompare(String(b.sourceSessionKey ?? ''));
+          });
+        const thinkingLevel = histories.find((history) => history.thinkingLevel)?.thinkingLevel ?? null;
 
+        if (rawMessages.length > 0) {
           applyLoadedMessages(rawMessages, thinkingLevel);
         } else {
           const fallbackMessages = await loadCronFallbackMessages(currentSessionKey, 200);
           if (fallbackMessages.length > 0) {
-            applyLoadedMessages(fallbackMessages, null);
+            applyLoadedMessages(annotateConversationMessages(fallbackMessages, currentSessionKey), null);
           } else {
             set({ messages: [], loading: false });
           }
@@ -1459,7 +1825,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     })();
 
-    _historyLoadInFlight.set(currentSessionKey, loadPromise);
+    _historyLoadInFlight.set(loadKey, loadPromise);
     try {
       await loadPromise;
     } finally {
@@ -1467,12 +1833,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (loadingSafetyTimer) clearTimeout(loadingSafetyTimer);
       if (!loadingTimedOut) {
         // Only update load time if we actually didn't time out
-        _lastHistoryLoadAtBySession.set(currentSessionKey, Date.now());
+        _lastHistoryLoadAtBySession.set(loadKey, Date.now());
       }
       
-      const active = _historyLoadInFlight.get(currentSessionKey);
+      const active = _historyLoadInFlight.get(loadKey);
       if (active === loadPromise) {
-        _historyLoadInFlight.delete(currentSessionKey);
+        _historyLoadInFlight.delete(loadKey);
       }
     }
   },
@@ -1487,12 +1853,37 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const trimmed = text.trim();
     if (!trimmed && (!attachments || attachments.length === 0)) return;
 
-    const targetSessionKey = resolveMainSessionKeyForAgent(targetAgentId) ?? get().currentSessionKey;
-
-    if (targetSessionKey !== get().currentSessionKey) {
-      set((s) => buildSessionSwitchPatch(s, targetSessionKey));
-      await get().loadHistory(true);
-    }
+    const stateBeforeSend = get();
+    const conversationKey = stateBeforeSend.currentConversationKey || getConversationKeyFromSessionKey(stateBeforeSend.currentSessionKey);
+    const persistentResponderAgentId = normalizeAgentId(stateBeforeSend.currentResponderAgentId || stateBeforeSend.currentAgentId);
+    const targetResponderAgentId = normalizeAgentId(targetAgentId || persistentResponderAgentId);
+    const existingThread = normalizeConversationThread(stateBeforeSend.currentSessionKey, stateBeforeSend.conversationThreads);
+    const targetSessionKey = getThreadSessionKey(existingThread, conversationKey, targetResponderAgentId);
+    const nextThread: ConversationThread = {
+      ...existingThread,
+      conversationKey,
+      responderAgentId: targetAgentId ? existingThread.responderAgentId : targetResponderAgentId,
+      sessionKeysByAgentId: {
+        ...existingThread.sessionKeysByAgentId,
+        [targetResponderAgentId]: targetSessionKey,
+      },
+      updatedAt: Date.now(),
+    };
+    set((state) => {
+      const conversationThreads = {
+        ...state.conversationThreads,
+        [conversationKey]: nextThread,
+      };
+      persistConversationThreads(conversationThreads);
+      return {
+        currentSessionKey: targetSessionKey,
+        currentAgentId: targetResponderAgentId,
+        currentConversationKey: conversationKey,
+        currentResponderAgentId: nextThread.responderAgentId,
+        conversationThreads,
+        sessions: ensureSessionEntry(state.sessions, targetSessionKey),
+      };
+    });
 
     const currentSessionKey = targetSessionKey;
 
@@ -1503,6 +1894,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       content: trimmed || (attachments?.length ? '(file attached)' : ''),
       timestamp: nowMs / 1000,
       id: crypto.randomUUID(),
+      sourceSessionKey: currentSessionKey,
+      targetAgentId: targetResponderAgentId,
       _attachedFiles: attachments?.map(a => ({
         fileName: a.fileName,
         mimeType: a.mimeType,
@@ -1527,7 +1920,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const isFirstMessage = !messages.slice(0, -1).some((m) => m.role === 'user');
     if (!currentSessionKey.endsWith(':main') && isFirstMessage && !sessionLabels[currentSessionKey] && trimmed) {
       const truncated = trimmed.length > 50 ? `${trimmed.slice(0, 50)}…` : trimmed;
-      set((s) => ({ sessionLabels: { ...s.sessionLabels, [currentSessionKey]: truncated } }));
+      set((s) => ({
+        sessionLabels: {
+          ...s.sessionLabels,
+          [currentSessionKey]: truncated,
+          [buildSessionKeyForConversationAgent(conversationKey, 'main')]: s.sessionLabels[buildSessionKeyForConversationAgent(conversationKey, 'main')] ?? truncated,
+        },
+      }));
     }
 
     // Mark this session as most recently active
@@ -1679,10 +2078,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const runId = String(event.runId || '');
     const eventState = String(event.state || '');
     const eventSessionKey = event.sessionKey != null ? String(event.sessionKey) : null;
-    const { activeRunId, currentSessionKey } = get();
+    const { activeRunId, currentSessionKey, currentConversationKey, sessions, conversationThreads } = get();
 
-    // Only process events for the current session (when sessionKey is present)
-    if (eventSessionKey != null && eventSessionKey !== currentSessionKey) return;
+    // Only process events for the current conversation (when sessionKey is present).
+    if (eventSessionKey != null) {
+      const conversationKey = currentConversationKey || getConversationKeyFromSessionKey(currentSessionKey);
+      const acceptedSessionKeys = new Set(getConversationSessionKeys(
+        conversationKey,
+        sessions,
+        conversationThreads,
+        currentSessionKey,
+      ));
+      if (!acceptedSessionKeys.has(eventSessionKey)) return;
+    }
 
     // Only process events for the active run (or if no active run set)
     if (activeRunId && runId && runId !== activeRunId) return;
@@ -1742,6 +2150,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
             if (event.message && typeof event.message === 'object') {
               const msgRole = (event.message as RawMessage).role;
               if (isToolResultRole(msgRole)) return s.streamingMessage;
+              return {
+                ...(event.message as RawMessage),
+                sourceSessionKey: eventSessionKey ?? currentSessionKey,
+                responderAgentId: getAgentIdFromSessionKey(eventSessionKey ?? currentSessionKey),
+              };
             }
             return event.message ?? s.streamingMessage;
           })(),
@@ -1753,7 +2166,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         clearErrorRecoveryTimer();
         if (get().error) set({ error: null });
         // Message complete - add to history and clear streaming
-        const finalMsg = event.message as RawMessage | undefined;
+        const finalMsg = event.message && typeof event.message === 'object'
+          ? {
+            ...(event.message as RawMessage),
+            sourceSessionKey: eventSessionKey ?? currentSessionKey,
+            responderAgentId: getAgentIdFromSessionKey(eventSessionKey ?? currentSessionKey),
+          }
+          : undefined;
         if (finalMsg) {
           const updates = collectToolUpdates(finalMsg, resolvedState);
           if (isToolResultRole(finalMsg.role)) {

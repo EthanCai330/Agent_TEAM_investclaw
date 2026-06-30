@@ -6,6 +6,7 @@
 import { useMemo } from 'react';
 import { RefreshCw, Brain, Bot } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { InteractionModeSwitch } from '@/components/common/InteractionModeSwitch';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useChatStore } from '@/stores/chat';
 import { useAgentsStore } from '@/stores/agents';
@@ -17,20 +18,61 @@ export function ChatToolbar() {
   const loading = useChatStore((s) => s.loading);
   const showThinking = useChatStore((s) => s.showThinking);
   const toggleThinking = useChatStore((s) => s.toggleThinking);
-  const currentAgentId = useChatStore((s) => s.currentAgentId);
+  const currentResponderAgentId = useChatStore((s) => s.currentResponderAgentId);
+  const setCurrentResponderAgent = useChatStore((s) => s.setCurrentResponderAgent);
+  const sending = useChatStore((s) => s.sending);
   const agents = useAgentsStore((s) => s.agents);
   const { t } = useTranslation('chat');
+  const agentOptions = useMemo(
+    () => {
+      const options = [
+        { id: 'main', name: t('toolbar.mainAgent') },
+        ...(agents ?? []).map((agent) => ({ id: agent.id, name: agent.name || agent.id })),
+      ];
+      if (!options.some((agent) => agent.id === currentResponderAgentId)) {
+        options.push({ id: currentResponderAgentId, name: currentResponderAgentId });
+      }
+      const seen = new Set<string>();
+      return options.filter((agent) => {
+        if (seen.has(agent.id)) return false;
+        seen.add(agent.id);
+        return true;
+      });
+    },
+    [agents, currentResponderAgentId, t],
+  );
   const currentAgentName = useMemo(
-    () => (agents ?? []).find((agent) => agent.id === currentAgentId)?.name ?? currentAgentId,
-    [agents, currentAgentId],
+    () => agentOptions.find((agent) => agent.id === currentResponderAgentId)?.name ?? currentResponderAgentId,
+    [agentOptions, currentResponderAgentId],
+  );
+  const currentAgentValue = useMemo(
+    () => agentOptions.some((agent) => agent.id === currentResponderAgentId) ? currentResponderAgentId : 'main',
+    [agentOptions, currentResponderAgentId],
   );
 
   return (
     <div className="flex items-center gap-2">
-      <div className="hidden sm:flex items-center gap-1.5 rounded-full border border-black/10 bg-white/70 px-3 py-1.5 text-[12px] font-medium text-foreground/80 dark:border-white/10 dark:bg-white/5">
-        <Bot className="h-3.5 w-3.5 text-primary" />
-        <span>{t('toolbar.currentAgent', { agent: currentAgentName })}</span>
-      </div>
+      <InteractionModeSwitch compact />
+      <label
+        className="soft-row hidden items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[12px] font-medium text-foreground/80 sm:flex"
+        title={t('toolbar.currentAgent', { agent: currentAgentName })}
+      >
+        <Bot className="h-3.5 w-3.5 text-muted-foreground" />
+        <span className="sr-only">{t('toolbar.selectAgent')}</span>
+        <select
+          value={currentAgentValue}
+          disabled={loading || sending}
+          onChange={(event) => setCurrentResponderAgent(event.target.value)}
+          className="max-w-[180px] cursor-pointer truncate border-0 bg-transparent py-0 pl-0 pr-1 text-[12px] font-medium text-foreground/80 outline-none disabled:cursor-not-allowed disabled:opacity-60 dark:bg-transparent"
+          aria-label={t('toolbar.selectAgent')}
+        >
+          {agentOptions.map((agent) => (
+            <option key={agent.id} value={agent.id}>
+              {agent.name}
+            </option>
+          ))}
+        </select>
+      </label>
       {/* Refresh */}
       <Tooltip>
         <TooltipTrigger asChild>
@@ -57,7 +99,7 @@ export function ChatToolbar() {
             size="icon"
             className={cn(
               'h-8 w-8',
-              showThinking && 'bg-primary/10 text-primary',
+              showThinking && 'zone-chat zone-active',
             )}
             onClick={toggleThinking}
           >

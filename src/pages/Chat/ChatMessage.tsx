@@ -3,7 +3,7 @@
  * Renders user / assistant / system / toolresult messages
  * with markdown, thinking sections, images, and tool cards.
  */
-import { useState, useCallback, useEffect, memo } from 'react';
+import { useState, useCallback, useEffect, useMemo, memo } from 'react';
 import { Sparkles, Copy, Check, ChevronDown, ChevronRight, Wrench, FileText, Film, Music, FileArchive, File, X, FolderOpen, ZoomIn, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -11,8 +11,9 @@ import { createPortal } from 'react-dom';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { invokeIpc } from '@/lib/api-client';
+import { useAgentsStore } from '@/stores/agents';
 import type { RawMessage, AttachedFileMeta } from '@/stores/chat';
-import { extractText, extractThinking, extractImages, extractToolUse, formatTimestamp } from './message-utils';
+import { extractText, extractThinking, extractImages, extractToolUse, formatExactTimestamp, formatTimestamp } from './message-utils';
 
 interface ChatMessageProps {
   message: RawMessage;
@@ -56,6 +57,12 @@ export const ChatMessage = memo(function ChatMessage({
 
   const attachedFiles = message._attachedFiles || [];
   const [lightboxImg, setLightboxImg] = useState<{ src: string; fileName: string; filePath?: string; base64?: string; mimeType?: string } | null>(null);
+  const agents = useAgentsStore((s) => s.agents);
+  const responderLabel = useMemo(() => {
+    if (isUser || !message.responderAgentId) return null;
+    if (message.responderAgentId === 'main') return 'Main Agent';
+    return agents.find((agent) => agent.id === message.responderAgentId)?.name ?? message.responderAgentId;
+  }, [agents, isUser, message.responderAgentId]);
 
   // Never render tool result messages in chat UI
   if (isToolResult) return null;
@@ -72,7 +79,7 @@ export const ChatMessage = memo(function ChatMessage({
     >
       {/* Avatar */}
       {!isUser && (
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full mt-1 bg-black/5 dark:bg-white/5 text-foreground">
+        <div className="zone-chip mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full">
           <Sparkles className="h-4 w-4" />
         </div>
       )}
@@ -86,6 +93,12 @@ export const ChatMessage = memo(function ChatMessage({
       >
         {isStreaming && !isUser && streamingTools.length > 0 && (
           <ToolStatusBar tools={streamingTools} />
+        )}
+
+        {responderLabel && (
+          <span className="ml-1 text-[10px] font-medium text-muted-foreground/65">
+            {responderLabel}
+          </span>
         )}
 
         {/* Thinking section */}
@@ -216,13 +229,16 @@ export const ChatMessage = memo(function ChatMessage({
 
         {/* Hover row for user messages — timestamp only */}
         {isUser && message.timestamp && (
-          <span className="text-xs text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity duration-200 select-none">
+          <span
+            className="text-xs text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity duration-200 select-none"
+            title={formatExactTimestamp(message.timestamp)}
+          >
             {formatTimestamp(message.timestamp)}
           </span>
         )}
 
-        {/* Hover row for assistant messages — only when there is real text content */}
-        {!isUser && hasText && (
+        {/* Hover row for assistant messages — timestamp is still useful for thinking/tool-only messages */}
+        {!isUser && message.timestamp && (
           <AssistantHoverBar text={text} timestamp={message.timestamp} />
         )}
       </div>
@@ -271,12 +287,12 @@ function ToolStatusBar({
             key={tool.toolCallId || tool.id || tool.name}
             className={cn(
               'flex items-center gap-2 rounded-lg border px-3 py-2 text-xs transition-colors',
-              isRunning && 'border-primary/30 bg-primary/5 text-foreground',
-              !isRunning && !isError && 'border-border/50 bg-muted/20 text-muted-foreground',
+              isRunning && 'border-border/60 bg-card/50 text-foreground',
+              !isRunning && !isError && 'soft-row text-muted-foreground',
               isError && 'border-destructive/30 bg-destructive/5 text-destructive',
             )}
           >
-            {isRunning && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary shrink-0" />}
+            {isRunning && <Loader2 className="h-3.5 w-3.5 animate-spin zone-icon shrink-0" />}
             {!isRunning && !isError && <CheckCircle2 className="h-3.5 w-3.5 text-green-500 shrink-0" />}
             {isError && <AlertCircle className="h-3.5 w-3.5 text-destructive shrink-0" />}
             <Wrench className="h-3 w-3 shrink-0 opacity-60" />
@@ -305,7 +321,7 @@ function AssistantHoverBar({ text, timestamp }: { text: string; timestamp?: numb
 
   return (
     <div className="flex items-center justify-between w-full opacity-0 group-hover:opacity-100 transition-opacity duration-200 select-none px-1">
-      <span className="text-xs text-muted-foreground">
+      <span className="text-xs text-muted-foreground" title={formatExactTimestamp(timestamp)}>
         {timestamp ? formatTimestamp(timestamp) : ''}
       </span>
       <Button
@@ -337,8 +353,8 @@ function MessageBubble({
         'relative rounded-2xl px-4 py-3',
         !isUser && 'w-full',
         isUser
-          ? 'bg-[#0a84ff] text-white shadow-sm'
-          : 'bg-black/5 dark:bg-white/5 text-foreground',
+          ? 'tinted-panel text-foreground'
+          : 'soft-row text-foreground',
       )}
     >
       {isUser ? (
@@ -378,7 +394,7 @@ function MessageBubble({
             {text}
           </ReactMarkdown>
           {isStreaming && (
-            <span className="inline-block w-2 h-4 bg-foreground/50 animate-pulse ml-0.5" />
+            <span className="ml-0.5 inline-block h-4 w-2 bg-foreground/40" />
           )}
         </div>
       )}
@@ -393,7 +409,7 @@ function ThinkingBlock({ content }: { content: string }) {
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <div className="w-full rounded-xl border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 text-[14px]">
+    <div className="soft-row w-full rounded-xl text-[14px]">
       <button
         className="flex items-center gap-2 w-full px-3 py-2 text-muted-foreground hover:text-foreground transition-colors"
         onClick={() => setExpanded(!expanded)}
@@ -430,30 +446,242 @@ function FileIcon({ mimeType, className }: { mimeType: string; className?: strin
   return <File className={className} />;
 }
 
+function isMarkdownFile(file: AttachedFileMeta): boolean {
+  const name = file.fileName.toLowerCase();
+  return file.mimeType === 'text/markdown' || name.endsWith('.md') || name.endsWith('.markdown');
+}
+
 function FileCard({ file }: { file: AttachedFileMeta }) {
-  const handleOpen = useCallback(() => {
-    if (file.filePath) {
-      invokeIpc('shell:openPath', file.filePath);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [preview, setPreview] = useState<{ text: string; error?: string } | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const canPreview = !!file.filePath && isMarkdownFile(file);
+
+  const handleOpen = useCallback(async () => {
+    if (!file.filePath) return;
+    setMenu(null);
+    setActionMessage(null);
+    try {
+      const result = await invokeIpc('shell:openPath', file.filePath) as { ok?: boolean; error?: string } | string | undefined;
+      if (typeof result === 'string' && result) {
+        setActionMessage(result);
+      } else if (result && typeof result === 'object' && result.ok === false) {
+        setActionMessage(result.error || '无法打开文件');
+      }
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : String(error));
     }
   }, [file.filePath]);
 
+  const handleReveal = useCallback(async () => {
+    if (!file.filePath) return;
+    setMenu(null);
+    setActionMessage(null);
+    try {
+      const result = await invokeIpc('shell:showItemInFolder', file.filePath) as { ok?: boolean; error?: string } | undefined;
+      if (result && typeof result === 'object' && result.ok === false) {
+        setActionMessage(result.error || '无法在 Finder 中打开');
+      }
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, [file.filePath]);
+
+  const handleCopyPath = useCallback(async () => {
+    if (!file.filePath) return;
+    setMenu(null);
+    setActionMessage(null);
+    try {
+      await navigator.clipboard?.writeText(file.filePath);
+      setActionMessage('路径已复制');
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : '复制路径失败');
+    }
+  }, [file.filePath]);
+
+  const handlePreview = useCallback(async () => {
+    if (!file.filePath) return;
+    setMenu(null);
+    setPreviewLoading(true);
+    try {
+      const result = await invokeIpc('file:readText', file.filePath) as {
+        ok?: boolean;
+        text?: string;
+        error?: string;
+      };
+      setPreview({
+        text: result.ok && typeof result.text === 'string' ? result.text : '',
+        error: result.ok ? undefined : result.error || '无法预览该文件',
+      });
+    } catch (error) {
+      setPreview({ text: '', error: String(error) });
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, [file.filePath]);
+
+  const handlePrimaryClick = useCallback(() => {
+    if (canPreview) {
+      void handlePreview();
+      return;
+    }
+    handleOpen();
+  }, [canPreview, handleOpen, handlePreview]);
+
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    window.addEventListener('click', close);
+    window.addEventListener('keydown', close);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('keydown', close);
+    };
+  }, [menu]);
+
   return (
-    <div 
-      className={cn(
-        "flex items-center gap-3 rounded-xl border border-black/10 dark:border-white/10 px-3 py-2.5 bg-black/5 dark:bg-white/5 max-w-[220px]",
-        file.filePath && "cursor-pointer hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
-      )}
-      onClick={handleOpen}
-      title={file.filePath ? "Open file" : undefined}
-    >
-      <FileIcon mimeType={file.mimeType} className="h-5 w-5 shrink-0 text-muted-foreground" />
-      <div className="min-w-0 overflow-hidden">
-        <p className="text-xs font-medium truncate">{file.fileName}</p>
-        <p className="text-[10px] text-muted-foreground">
-          {file.fileSize > 0 ? formatFileSize(file.fileSize) : 'File'}
-        </p>
+    <>
+      <div
+        className={cn(
+          "soft-row flex max-w-[220px] items-center gap-3 rounded-xl px-3 py-2.5",
+          file.filePath && "zone-hoverable cursor-pointer transition-colors"
+        )}
+        onClick={handlePrimaryClick}
+        onContextMenu={(event) => {
+          if (!file.filePath) return;
+          event.preventDefault();
+          event.stopPropagation();
+          setMenu({ x: event.clientX, y: event.clientY });
+        }}
+        title={file.filePath ?? file.fileName}
+      >
+        <FileIcon mimeType={file.mimeType} className="h-5 w-5 shrink-0 text-muted-foreground" />
+        <div className="min-w-0 overflow-hidden">
+          <p className="truncate text-xs font-medium">{file.fileName}</p>
+          <p className="truncate text-[10px] text-muted-foreground">
+            {file.filePath || (file.fileSize > 0 ? formatFileSize(file.fileSize) : 'File')}
+          </p>
+        </div>
       </div>
-    </div>
+
+      {menu && createPortal(
+        <div
+          className="fixed z-[70] min-w-44 rounded-xl border border-border bg-popover p-1 text-sm text-popover-foreground shadow-xl"
+          style={{ left: menu.x, top: menu.y }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          {canPreview && (
+            <button type="button" className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left hover:bg-accent" onClick={() => void handlePreview()}>
+              <FileText className="h-4 w-4" />
+              预览 Markdown
+            </button>
+          )}
+          <button type="button" className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left hover:bg-accent" onClick={handleOpen}>
+            <File className="h-4 w-4" />
+            打开文件
+          </button>
+          <button type="button" className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left hover:bg-accent" onClick={handleReveal}>
+            <FolderOpen className="h-4 w-4" />
+            在 Finder 中打开
+          </button>
+          <button type="button" className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left hover:bg-accent" onClick={handleCopyPath}>
+            <Copy className="h-4 w-4" />
+            复制路径
+          </button>
+        </div>,
+        document.body,
+      )}
+
+      {actionMessage && (
+        <div className="mt-1 max-w-[220px] text-[10px] text-muted-foreground">
+          {actionMessage}
+        </div>
+      )}
+
+      {(preview || previewLoading) && (
+        <MarkdownPreviewModal
+          file={file}
+          loading={previewLoading}
+          text={preview?.text ?? ''}
+          error={preview?.error}
+          onClose={() => setPreview(null)}
+          onOpen={handleOpen}
+          onReveal={handleReveal}
+        />
+      )}
+    </>
+  );
+}
+
+function MarkdownPreviewModal({
+  file,
+  loading,
+  text,
+  error,
+  onClose,
+  onOpen,
+  onReveal,
+}: {
+  file: AttachedFileMeta;
+  loading: boolean;
+  text: string;
+  error?: string;
+  onClose: () => void;
+  onOpen: () => void;
+  onReveal: () => void;
+}) {
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [onClose]);
+
+  return createPortal(
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 p-6" onClick={onClose}>
+      <div
+        className="flex max-h-[82vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-border bg-background shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center gap-2 border-b border-border px-4 py-3">
+          <FileText className="h-4 w-4 text-muted-foreground" />
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-medium">{file.fileName}</div>
+            {file.filePath && <div className="truncate text-[11px] text-muted-foreground">{file.filePath}</div>}
+          </div>
+          {file.filePath && (
+            <>
+              <Button variant="ghost" size="sm" onClick={onOpen}>打开文件</Button>
+              <Button variant="ghost" size="sm" onClick={onReveal}>Finder</Button>
+            </>
+          )}
+          <Button variant="ghost" size="icon" className="h-8 w-8" onClick={onClose}>
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+          {loading ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              正在读取 Markdown...
+            </div>
+          ) : error ? (
+            <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+              {error}
+            </div>
+          ) : (
+            <div className="prose prose-sm max-w-none dark:prose-invert">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {text}
+              </ReactMarkdown>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 

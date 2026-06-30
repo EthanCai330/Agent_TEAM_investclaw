@@ -2019,11 +2019,24 @@ function registerShellHandlers(): void {
 
   // Open path in file explorer
   ipcMain.handle('shell:showItemInFolder', async (_, path: string) => {
+    if (!path || typeof path !== 'string') {
+      return { ok: false, error: 'Invalid file path' };
+    }
+    if (!existsSync(path)) {
+      return { ok: false, error: `File does not exist: ${path}` };
+    }
     shell.showItemInFolder(path);
+    return { ok: true };
   });
 
   // Open path
   ipcMain.handle('shell:openPath', async (_, path: string) => {
+    if (!path || typeof path !== 'string') {
+      return 'Invalid file path';
+    }
+    if (!existsSync(path)) {
+      return `File does not exist: ${path}`;
+    }
     return await shell.openPath(path);
   });
 }
@@ -2386,6 +2399,32 @@ function registerFileHandlers(): void {
     }
 
     return { id, fileName: payload.fileName, mimeType, fileSize, stagedPath, preview };
+  });
+
+  ipcMain.handle('file:readText', async (_, filePath: string) => {
+    try {
+      if (!filePath || typeof filePath !== 'string') {
+        return { ok: false, error: 'Invalid file path' };
+      }
+      const fsP = await import('fs/promises');
+      const s = await fsP.stat(filePath);
+      const maxBytes = 2 * 1024 * 1024;
+      if (s.size > maxBytes) {
+        return { ok: false, error: 'File is too large to preview', filePath, size: s.size };
+      }
+      const ext = extname(filePath);
+      const mimeType = getMimeType(ext);
+      const lowerExt = ext.toLowerCase();
+      const isTextLike = mimeType.startsWith('text/')
+        || ['.md', '.markdown', '.json', '.csv', '.txt', '.log', '.xml', '.yaml', '.yml'].includes(lowerExt);
+      if (!isTextLike) {
+        return { ok: false, error: 'File type is not previewable as text', filePath, mimeType, size: s.size };
+      }
+      const text = await fsP.readFile(filePath, 'utf8');
+      return { ok: true, text, filePath, mimeType, size: s.size };
+    } catch (error) {
+      return { ok: false, error: String(error), filePath };
+    }
   });
 
   // Load thumbnails for file paths on disk (used to restore previews in history)

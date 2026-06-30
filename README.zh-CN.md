@@ -101,6 +101,15 @@ InvestClaw 将运行时直接打包进桌面应用本体中，让安装、升级
 通过现代化的聊天体验与 AI 智能体交互。支持多会话上下文、消息历史记录、Markdown 富文本渲染，以及在多 Agent 场景下通过主输入框中的 `@agent` 直接路由到目标智能体。
 当你使用 `@agent` 选择其他智能体时，InvestClaw 会直接切换到该智能体自己的对话上下文，而不是经过默认智能体转发。各 Agent 工作区默认彼此分离，但更强的运行时隔离仍取决于运行时自身的 sandbox 配置。
 每个 Agent 还可以单独覆盖自己的 `provider/model` 运行时设置；未覆盖的 Agent 会继续继承全局默认模型。
+侧边栏会把历史组织为 Agent 集群、项目文件夹和单独对话。单独对话可以拖入项目文件夹做本地 UI 归档，不移动底层 OpenClaw transcript 文件。
+
+### 🧠 Agent 集群
+可以从 prompt、Markdown、单个文件或项目目录创建 Agent 集群。目录导入只读取 `README.md`、`HANDOFF.md`、`agents/*.md` 和 `skills/*/SKILL.md`，避免把整个代码库塞进上下文。
+集群创建会调用当前选择/默认的 LLM Provider 生成 Agent 定义、共享上下文和受控 Workflow IR。工作流支持 `Agent`、`Fan-out`、`Join`、`Gate`、`Review`、`Reduce`、`Loop` 和 `Human Gate` 八类节点；模型只能从注册节点与策略中规划，不能生成任意 JavaScript。
+运行前必须编辑并确认 Workflow 版本。Electron Main 中的 Harness 持有调度权：限制并发、验证产物与 Schema、执行重试/暂停/恢复/停止、保存节点 checkpoint，并在重启后核对 transcript 和产物继续运行。每次 run 绑定不可变 Workflow 快照，运行中的编辑不会改变当前任务。
+详情页默认把 Workflow 压缩为业务主链：Agent 使用主节点，Gate 显示为连线上的小检查点，Loop 显示为包围重复子链的范围；完整 Harness 算子和兼容关系图只在编辑模式展开。运行状态由 Electron Main 推送，Renderer 不再固定轮询整份集群数据。
+暂停采用硬暂停：会请求中止已启动子会话并保留 checkpoint；恢复时只重提未完成节点。Loop 会在每轮重置内部 Gate，确保 `A → [B → C → D] × n` 这类链路不会跨轮并行越过顺序。
+每个集群都带有 LLM Cluster Manager。自然语言修改会先生成待确认提案，可修改 Prompt、Agent、Harness 算子、连接和策略；应用后创建新的 Workflow 草稿版本，旧版本与历史运行保持可追溯。
 
 ### 📡 多频道管理
 同时配置和监控多个 AI 频道。每个频道独立运行，允许你为不同任务运行专门的智能体。

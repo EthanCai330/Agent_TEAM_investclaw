@@ -52,6 +52,11 @@ async function writeAgentAuthProfiles(agentId: string, store: Record<string, unk
   await writeFile(join(agentDir, 'auth-profiles.json'), JSON.stringify(store, null, 2), 'utf8');
 }
 
+async function readAgentModels(agentId: string): Promise<Record<string, unknown>> {
+  const content = await readFile(join(testHome, '.openclaw', 'agents', agentId, 'agent', 'models.json'), 'utf8');
+  return JSON.parse(content) as Record<string, unknown>;
+}
+
 describe('saveProviderKeyToOpenClaw', () => {
   beforeEach(async () => {
     vi.resetModules();
@@ -120,6 +125,47 @@ describe('saveProviderKeyToOpenClaw', () => {
     );
 
     logSpy.mockRestore();
+  });
+});
+
+describe('updateAgentModelProvider', () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.restoreAllMocks();
+    await rm(testHome, { recursive: true, force: true });
+    await rm(testUserData, { recursive: true, force: true });
+  });
+
+  it('always syncs model metadata to main and agent runtime registries', async () => {
+    await writeOpenClawJson({
+      agents: {
+        list: [
+          {
+            id: 'coder',
+            name: 'Coder',
+            workspace: '~/.openclaw/workspace-coder',
+            agentDir: '~/.openclaw/agents/coder/agent',
+          },
+        ],
+      },
+    });
+
+    const { updateAgentModelProvider } = await import('@electron/utils/openclaw-auth');
+
+    await updateAgentModelProvider('custom-runtime', {
+      baseUrl: 'http://localhost:8080/v1',
+      api: 'openai-completions',
+      models: [{ id: 'GLM5.2', name: 'GLM5.2', contextWindow: 200000, maxTokens: 10000 }],
+      apiKey: 'sk-test',
+    });
+
+    for (const agentId of ['main', 'agent', 'coder']) {
+      const models = await readAgentModels(agentId);
+      const provider = (models.providers as Record<string, { models: Array<Record<string, unknown>> }>)['custom-runtime'];
+      expect(provider.models).toEqual([
+        { id: 'GLM5.2', name: 'GLM5.2', contextWindow: 200000, maxTokens: 10000 },
+      ]);
+    }
   });
 });
 

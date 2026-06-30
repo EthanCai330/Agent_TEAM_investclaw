@@ -55,6 +55,24 @@ export function formatDuration(seconds: number): string {
 }
 
 /**
+ * Format elapsed seconds with seconds retained for run monitoring.
+ */
+export function formatElapsedDuration(seconds: number): string {
+  const safeSeconds = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const secs = safeSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(secs).padStart(2, '0')}s`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${String(secs).padStart(2, '0')}s`;
+  }
+  return `${secs}s`;
+}
+
+/**
  * Delay for a specified number of milliseconds
  */
 export function delay(ms: number): Promise<void> {

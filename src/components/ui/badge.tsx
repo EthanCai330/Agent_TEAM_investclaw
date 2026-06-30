@@ -8,21 +8,21 @@ import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '@/lib/utils';
 
 const badgeVariants = cva(
-  'inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2',
+  'inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-medium tracking-[0.01em] transition-colors focus:outline-none focus:ring-2 focus:ring-ring/30 focus:ring-offset-0',
   {
     variants: {
       variant: {
         default:
-          'border-transparent bg-primary text-primary-foreground hover:bg-primary/80',
+          'border-border/70 bg-foreground/[0.07] text-foreground hover:bg-foreground/[0.09]',
         secondary:
-          'border-transparent bg-secondary text-secondary-foreground hover:bg-secondary/80',
+          'border-border/55 bg-secondary/70 text-secondary-foreground hover:bg-secondary/85',
         destructive:
-          'border-transparent bg-destructive text-destructive-foreground hover:bg-destructive/80',
-        outline: 'text-foreground',
+          'border-destructive/25 bg-destructive/[0.12] text-destructive hover:bg-destructive/[0.18] dark:text-red-100',
+        outline: 'border-border/70 text-foreground',
         success:
-          'border-transparent bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-100',
+          'border-emerald-500/20 bg-emerald-500/12 text-emerald-700 dark:text-emerald-200',
         warning:
-          'border-transparent bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-100',
+          'border-amber-500/20 bg-amber-500/14 text-amber-700 dark:text-amber-200',
       },
     },
     defaultVariants: {

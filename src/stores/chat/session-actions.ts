@@ -1,4 +1,5 @@
 import { invokeIpc } from '@/lib/api-client';
+import { useAgentsStore } from '@/stores/agents';
 import { getCanonicalPrefixFromSessions, getMessageText, toMs } from './helpers';
 import { DEFAULT_CANONICAL_PREFIX, DEFAULT_SESSION_KEY, type ChatSession, type RawMessage } from './types';
 import type { ChatGet, ChatSet, SessionHistoryActions } from './store-api';
@@ -7,6 +8,17 @@ function getAgentIdFromSessionKey(sessionKey: string): string {
   if (!sessionKey.startsWith('agent:')) return 'main';
   const [, agentId] = sessionKey.split(':');
   return agentId || 'main';
+}
+
+function normalizeAgentId(value: string | undefined | null): string {
+  return (value ?? '').trim().toLowerCase() || 'main';
+}
+
+function resolveMainSessionKeyForAgent(agentId: string | undefined | null): string | null {
+  if (!agentId) return null;
+  const normalizedAgentId = normalizeAgentId(agentId);
+  const summary = useAgentsStore.getState().agents.find((agent) => agent.id === normalizedAgentId);
+  return summary?.mainSessionKey || `agent:${normalizedAgentId}:main`;
 }
 
 function parseSessionUpdatedAtMs(value: unknown): number | undefined {
@@ -25,7 +37,7 @@ function parseSessionUpdatedAtMs(value: unknown): number | undefined {
 export function createSessionActions(
   set: ChatSet,
   get: ChatGet,
-): Pick<SessionHistoryActions, 'loadSessions' | 'switchSession' | 'newSession' | 'deleteSession' | 'cleanupEmptySession'> {
+): Pick<SessionHistoryActions, 'loadSessions' | 'switchSession' | 'switchAgent' | 'setCurrentResponderAgent' | 'newSession' | 'deleteSession' | 'cleanupEmptySession'> {
   return {
     loadSessions: async () => {
       try {
@@ -181,6 +193,57 @@ export function createSessionActions(
           sessionLastActivity: Object.fromEntries(
             Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey),
           ),
+          sessionProjects: Object.fromEntries(
+            Object.entries(s.sessionProjects ?? {}).filter(([k]) => k !== currentSessionKey),
+          ),
+        } : {}),
+      }));
+      get().loadHistory();
+    },
+
+    switchAgent: (agentId: string) => {
+      get().setCurrentResponderAgent(agentId);
+    },
+
+    setCurrentResponderAgent: (agentId: string) => {
+      const nextSessionKey = resolveMainSessionKeyForAgent(agentId) ?? DEFAULT_SESSION_KEY;
+      if (nextSessionKey === get().currentSessionKey) return;
+      const { currentSessionKey, messages, sessionLastActivity, sessionLabels } = get();
+      const leavingEmpty = !currentSessionKey.endsWith(':main')
+        && messages.length === 0
+        && !sessionLastActivity[currentSessionKey]
+        && !sessionLabels[currentSessionKey];
+      set((s) => ({
+        currentSessionKey: nextSessionKey,
+        currentAgentId: getAgentIdFromSessionKey(nextSessionKey),
+        sessions: s.sessions.some((session) => session.key === nextSessionKey)
+          ? s.sessions
+          : [...s.sessions, { key: nextSessionKey, displayName: nextSessionKey }],
+        messages: [],
+        streamingText: '',
+        streamingMessage: null,
+        streamingTools: [],
+        activeRunId: null,
+        error: null,
+        pendingFinal: false,
+        lastUserMessageAt: null,
+        pendingToolImages: [],
+        ...(leavingEmpty ? {
+          sessions: [
+            ...s.sessions.filter((session) => session.key !== currentSessionKey),
+            ...(s.sessions.some((session) => session.key === nextSessionKey)
+              ? []
+              : [{ key: nextSessionKey, displayName: nextSessionKey }]),
+          ],
+          sessionLabels: Object.fromEntries(
+            Object.entries(s.sessionLabels).filter(([k]) => k !== currentSessionKey),
+          ),
+          sessionLastActivity: Object.fromEntries(
+            Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey),
+          ),
+          sessionProjects: Object.fromEntries(
+            Object.entries(s.sessionProjects ?? {}).filter(([k]) => k !== currentSessionKey),
+          ),
         } : {}),
       }));
       get().loadHistory();
@@ -221,6 +284,7 @@ export function createSessionActions(
           sessions: remaining,
           sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
           sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
+          sessionProjects: Object.fromEntries(Object.entries(s.sessionProjects ?? {}).filter(([k]) => k !== key)),
           messages: [],
           streamingText: '',
           streamingMessage: null,
@@ -241,6 +305,7 @@ export function createSessionActions(
           sessions: remaining,
           sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
           sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
+          sessionProjects: Object.fromEntries(Object.entries(s.sessionProjects ?? {}).filter(([k]) => k !== key)),
         }));
       }
     },
@@ -274,6 +339,9 @@ export function createSessionActions(
         sessionLastActivity: leavingEmpty
           ? Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey))
           : s.sessionLastActivity,
+        sessionProjects: leavingEmpty
+          ? Object.fromEntries(Object.entries(s.sessionProjects ?? {}).filter(([k]) => k !== currentSessionKey))
+          : s.sessionProjects,
         messages: [],
         streamingText: '',
         streamingMessage: null,
@@ -308,6 +376,9 @@ export function createSessionActions(
         ),
         sessionLastActivity: Object.fromEntries(
           Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey),
+        ),
+        sessionProjects: Object.fromEntries(
+          Object.entries(s.sessionProjects ?? {}).filter(([k]) => k !== currentSessionKey),
         ),
       }));
     },

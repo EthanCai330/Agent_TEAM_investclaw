@@ -83,6 +83,8 @@ export function legacyProviderToAccount(provider: ProviderWithKeyInfo): Provider
     baseUrl: provider.baseUrl,
     headers: provider.headers,
     model: provider.model,
+    contextWindow: provider.contextWindow,
+    maxTokens: provider.maxTokens,
     fallbackModels: provider.fallbackModels,
     fallbackAccountIds: provider.fallbackProviderIds,
     enabled: provider.enabled,

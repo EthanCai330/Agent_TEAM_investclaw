@@ -2,7 +2,7 @@
  * Utility Functions Tests
  */
 import { describe, it, expect } from 'vitest';
-import { cn, formatDuration, truncate } from '@/lib/utils';
+import { cn, formatDuration, formatElapsedDuration, truncate } from '@/lib/utils';
 
 describe('cn (class name merge)', () => {
   it('should merge class names', () => {
@@ -31,6 +31,20 @@ describe('formatDuration', () => {
   
   it('should format hours and minutes', () => {
     expect(formatDuration(3725)).toBe('1h 2m');
+  });
+});
+
+describe('formatElapsedDuration', () => {
+  it('should format seconds without padding', () => {
+    expect(formatElapsedDuration(42)).toBe('42s');
+  });
+
+  it('should format minutes and seconds with padded seconds', () => {
+    expect(formatElapsedDuration(629)).toBe('10m 29s');
+  });
+
+  it('should format hours, minutes, and seconds with padded minutes and seconds', () => {
+    expect(formatElapsedDuration(3723)).toBe('1h 02m 03s');
   });
 });
 

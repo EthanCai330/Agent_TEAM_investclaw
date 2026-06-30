@@ -83,12 +83,15 @@ describe('chat target routing', () => {
     vi.useRealTimers();
   });
 
-  it('switches to the selected agent main session before sending text', async () => {
+  it('routes a message to the selected agent inside the current conversation', async () => {
     const { useChatStore } = await import('@/stores/chat');
 
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
       currentAgentId: 'main',
+      currentConversationKey: 'main',
+      currentResponderAgentId: 'main',
+      conversationThreads: {},
       sessions: [{ key: 'agent:main:main' }],
       messages: [{ role: 'assistant', content: 'Existing main history' }],
       sessionLabels: {},
@@ -110,17 +113,19 @@ describe('chat target routing', () => {
     await useChatStore.getState().sendMessage('Hello direct agent', undefined, 'research');
 
     const state = useChatStore.getState();
-    expect(state.currentSessionKey).toBe('agent:research:desk');
+    expect(state.currentSessionKey).toBe('agent:research:main');
     expect(state.currentAgentId).toBe('research');
-    expect(state.sessions.some((session) => session.key === 'agent:research:desk')).toBe(true);
+    expect(state.currentResponderAgentId).toBe('main');
+    expect(state.currentConversationKey).toBe('main');
+    expect(state.sessions.some((session) => session.key === 'agent:research:main')).toBe(true);
     expect(state.messages.at(-1)?.content).toBe('Hello direct agent');
+    expect(state.messages.at(-1)?.targetAgentId).toBe('research');
 
-    const historyCall = gatewayRpcMock.mock.calls.find(([method]) => method === 'chat.history');
-    expect(historyCall?.[1]).toEqual({ sessionKey: 'agent:research:desk', limit: 200 });
+    expect(gatewayRpcMock.mock.calls.some(([method]) => method === 'chat.history')).toBe(false);
 
     const sendCall = gatewayRpcMock.mock.calls.find(([method]) => method === 'chat.send');
     expect(sendCall?.[1]).toMatchObject({
-      sessionKey: 'agent:research:desk',
+      sessionKey: 'agent:research:main',
       message: 'Hello direct agent',
       deliver: false,
     });
@@ -133,6 +138,9 @@ describe('chat target routing', () => {
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
       currentAgentId: 'main',
+      currentConversationKey: 'main',
+      currentResponderAgentId: 'main',
+      conversationThreads: {},
       sessions: [{ key: 'agent:main:main' }],
       messages: [],
       sessionLabels: {},
@@ -165,7 +173,8 @@ describe('chat target routing', () => {
       'research',
     );
 
-    expect(useChatStore.getState().currentSessionKey).toBe('agent:research:desk');
+    expect(useChatStore.getState().currentSessionKey).toBe('agent:research:main');
+    expect(useChatStore.getState().currentResponderAgentId).toBe('main');
 
     expect(hostApiFetchMock).toHaveBeenCalledWith(
       '/api/chat/send-with-media',
@@ -183,7 +192,7 @@ describe('chat target routing', () => {
       media: Array<{ filePath: string }>;
     };
 
-    expect(payload.sessionKey).toBe('agent:research:desk');
+    expect(payload.sessionKey).toBe('agent:research:main');
     expect(payload.message).toBe('Process the attached file(s).');
     expect(payload.media[0]?.filePath).toBe('/tmp/design.png');
   });

@@ -100,6 +100,15 @@ Complete the entire setup—from installation to your first AI interaction—thr
 Communicate with AI agents through a modern chat experience. Support for multiple conversation contexts, message history, rich content rendering with Markdown, and direct `@agent` routing in the main composer for multi-agent setups.
 When you target another agent with `@agent`, InvestClaw switches into that agent's own conversation context directly instead of relaying through the default agent. Agent workspaces stay separate by default, and stronger isolation depends on runtime sandbox settings.
 Each agent can also override its own `provider/model` runtime setting; agents without overrides continue inheriting the global default model.
+The sidebar organizes history into Agent Clusters, project folders, and standalone chats. Standalone chats can be dragged into a project folder for local UI organization without moving the underlying OpenClaw transcript files.
+
+### 🧠 Agent Clusters
+Create an Agent Cluster from a prompt, Markdown, a single file, or a project folder. Folder import reads only `README.md`, `HANDOFF.md`, `agents/*.md`, and `skills/*/SKILL.md` so project context stays bounded.
+Cluster creation uses the selected/default LLM provider to generate agent definitions, shared context, and a constrained Workflow IR. Workflows support eight node types: `Agent`, `Fan-out`, `Join`, `Gate`, `Review`, `Reduce`, `Loop`, and `Human Gate`. Models can only select registered nodes and policies; arbitrary generated JavaScript is never executed.
+Before running, users edit and confirm a versioned workflow. The Electron Main Harness owns scheduling, concurrency, artifact/schema validation, retries, pause/resume/stop, node checkpoints, and restart recovery. Every run binds an immutable workflow snapshot, so later edits cannot mutate work already in progress.
+The detail page defaults to a compact business flow: Agents are primary nodes, Gates are small checkpoints on connectors, and Loops wrap the repeated sub-flow. Full Harness operators and the compatibility graph only render in edit mode. Runtime state is pushed from Electron Main instead of polling the full cluster on a fixed renderer interval.
+Pause is a hard pause: InvestClaw requests abort for already-started child sessions and keeps the checkpoint; resume only resubmits unfinished nodes. Loops reset their internal Gates each round so flows such as `A → [B → C → D] × n` cannot skip order by reusing a previous round's completed Gate.
+Each cluster includes an LLM Cluster Manager. Natural-language changes become reviewable proposals that may patch prompts, agents, Harness operators, connections, and policies. Applying a proposal creates a new draft workflow version while older versions and historical runs remain traceable.
 
 ### 📡 Multi-Channel Management
 Configure and monitor multiple AI channels simultaneously. Each channel operates independently, allowing you to run specialized agents for different tasks.

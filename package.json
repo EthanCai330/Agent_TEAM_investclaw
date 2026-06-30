@@ -41,6 +41,7 @@
     "private": true,
     "scripts": {
         "init": "pnpm install && pnpm run uv:download",
+        "postinstall": "node scripts/fix-openclaw-nested-deps.mjs",
         "predev": "zx scripts/prepare-preinstalled-skills-dev.mjs",
         "dev": "vite",
         "start:local": "pnpm run build:vite && electron dist-electron/main/index.js",
@@ -85,6 +86,7 @@
         "ms": "^2.1.3",
         "node-machine-id": "^1.1.12",
         "posthog-node": "^5.28.0",
+        "proxy-agent-negotiate": "1.1.0",
         "ws": "^8.19.0"
     },
     "devDependencies": {

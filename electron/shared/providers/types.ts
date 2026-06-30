@@ -59,6 +59,8 @@ export interface ProviderConfig {
   apiProtocol?: ProviderProtocol;
   headers?: Record<string, string>;
   model?: string;
+  contextWindow?: number;
+  maxTokens?: number;
   fallbackModels?: string[];
   fallbackProviderIds?: string[];
   enabled: boolean;
@@ -123,6 +125,8 @@ export interface ProviderAccount {
   apiProtocol?: ProviderProtocol;
   headers?: Record<string, string>;
   model?: string;
+  contextWindow?: number;
+  maxTokens?: number;
   fallbackModels?: string[];
   fallbackAccountIds?: string[];
   enabled: boolean;

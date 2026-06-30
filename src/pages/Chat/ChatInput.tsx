@@ -18,6 +18,7 @@ import { useAgentsStore } from '@/stores/agents';
 import { useChatStore } from '@/stores/chat';
 import type { AgentSummary } from '@/types/agent';
 import { useTranslation } from 'react-i18next';
+import { BaseModelButton } from '@/components/common/BaseModelButton';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -97,7 +98,9 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false, i
   const isComposingRef = useRef(false);
   const gatewayStatus = useGatewayStore((s) => s.status);
   const agents = useAgentsStore((s) => s.agents);
-  const currentAgentId = useChatStore((s) => s.currentAgentId);
+  const currentResponderAgentId = useChatStore((s) => s.currentResponderAgentId);
+  const legacyCurrentAgentId = useChatStore((s) => s.currentAgentId);
+  const currentAgentId = currentResponderAgentId ?? legacyCurrentAgentId ?? 'main';
   const currentAgentName = useMemo(
     () => (agents ?? []).find((agent) => agent.id === currentAgentId)?.name ?? currentAgentId,
     [agents, currentAgentId],
@@ -416,13 +419,13 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false, i
         )}
 
         {/* Input Row */}
-        <div className={`relative bg-white dark:bg-card rounded-[28px] shadow-sm border p-1.5 transition-all ${dragOver ? 'border-primary ring-1 ring-primary' : 'border-black/10 dark:border-white/10'}`}>
+        <div className={`glass-shell relative rounded-[28px] p-1.5 transition-all ${dragOver ? 'border-border ring-1 ring-border/70' : ''}`}>
           {selectedTarget && (
             <div className="px-2.5 pt-2 pb-1">
               <button
                 type="button"
                 onClick={() => setTargetAgentId(null)}
-                className="inline-flex items-center gap-1.5 rounded-full border border-primary/20 bg-primary/5 px-3 py-1 text-[13px] font-medium text-foreground transition-colors hover:bg-primary/10"
+                className="zone-chip inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[13px] font-medium text-foreground transition-colors"
                 title={t('composer.clearTarget')}
               >
                 <span>{t('composer.targetChip', { agent: selectedTarget.name })}</span>
@@ -436,7 +439,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false, i
             <Button
               variant="ghost"
               size="icon"
-              className="shrink-0 h-10 w-10 rounded-full text-muted-foreground hover:bg-black/5 dark:hover:bg-white/10 hover:text-foreground transition-colors"
+              className="h-10 w-10 shrink-0 rounded-full text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
               onClick={pickFiles}
               disabled={disabled || sending}
               title={t('composer.attachFiles')}
@@ -450,8 +453,8 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false, i
                   variant="ghost"
                   size="icon"
                   className={cn(
-                    'h-10 w-10 rounded-full text-muted-foreground hover:bg-black/5 dark:hover:bg-white/10 hover:text-foreground transition-colors',
-                    (pickerOpen || selectedTarget) && 'bg-primary/10 text-primary hover:bg-primary/20'
+                    'h-10 w-10 rounded-full text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground',
+                    (pickerOpen || selectedTarget) && 'zone-chip'
                   )}
                   onClick={() => setPickerOpen((open) => !open)}
                   disabled={disabled || sending}
@@ -460,7 +463,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false, i
                   <AtSign className="h-4 w-4" />
                 </Button>
                 {pickerOpen && (
-                  <div className="absolute left-0 bottom-full z-20 mb-2 w-72 overflow-hidden rounded-2xl border border-black/10 bg-white p-1.5 shadow-xl dark:border-white/10 dark:bg-card">
+                  <div className="glass-shell absolute bottom-full left-0 z-20 mb-2 w-72 overflow-hidden rounded-2xl p-1.5">
                     <div className="px-3 py-2 text-[11px] font-medium text-muted-foreground/80">
                       {t('composer.agentPickerTitle', { currentAgent: currentAgentName })}
                     </div>
@@ -511,7 +514,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false, i
               size="icon"
               className={`shrink-0 h-10 w-10 rounded-full transition-colors ${
                 (sending || canSend)
-                  ? 'bg-black/5 dark:bg-white/10 text-foreground hover:bg-black/10 dark:hover:bg-white/20'
+                  ? 'zone-chip'
                   : 'text-muted-foreground/50 hover:bg-transparent bg-transparent'
               }`}
               variant="ghost"
@@ -525,10 +528,10 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false, i
             </Button>
           </div>
         </div>
-        <div className="mt-2.5 flex items-center justify-between gap-2 text-[11px] text-muted-foreground/60 px-4">
-          <div className="flex items-center gap-1.5">
+        <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 px-4 text-[11px] text-muted-foreground/60">
+          <div className="flex min-w-0 items-center gap-1.5">
             <div className={cn("w-1.5 h-1.5 rounded-full", gatewayStatus.state === 'running' ? "bg-green-500/80" : "bg-red-500/80")} />
-            <span>
+            <span className="truncate">
               {t('composer.gatewayStatus', {
                 state: gatewayStatus.state === 'running'
                   ? t('composer.gatewayConnected')
@@ -538,6 +541,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false, i
               })}
             </span>
           </div>
+          <BaseModelButton compact className="shrink-0" />
           {hasFailedAttachments && (
             <Button
               variant="link"
@@ -632,7 +636,7 @@ function AgentPickerItem({
       onClick={onSelect}
       className={cn(
         'flex w-full flex-col items-start rounded-xl px-3 py-2 text-left transition-colors',
-        selected ? 'bg-primary/10 text-foreground' : 'hover:bg-black/5 dark:hover:bg-white/5'
+        selected ? 'zone-active text-foreground' : 'zone-hoverable border border-transparent'
       )}
     >
       <span className="text-[14px] font-medium text-foreground">{agent.name}</span>

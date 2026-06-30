@@ -1,5 +1,6 @@
 import { invokeIpc } from '@/lib/api-client';
 import { useAgentsStore } from '@/stores/agents';
+import { useInteractionModeStore } from '@/stores/interaction-mode';
 import {
   clearErrorRecoveryTimer,
   clearHistoryPoll,
@@ -30,6 +31,39 @@ function resolveMainSessionKeyForAgent(agentId: string | undefined | null): stri
   const normalizedAgentId = normalizeAgentId(agentId);
   const summary = useAgentsStore.getState().agents.find((agent) => agent.id === normalizedAgentId);
   return summary?.mainSessionKey || buildFallbackMainSessionKey(normalizedAgentId);
+}
+
+function applyInteractionModePrompt(text: string): string {
+  const mode = useInteractionModeStore.getState().mode;
+  if (mode === 'run') return text;
+  if (mode === 'plan') {
+    return [
+      '你现在处于 InvestClaw Plan 模式。',
+      '严格要求：不要执行工具、不要写文件、不要启动任务、不要声称已经完成执行。',
+      '请只输出 2-3 个互斥可选方案，使用 A/B/C 标记。',
+      '每个方案包含：目标、步骤、风险、适用场景、预计成本/耗时。',
+      '最后给出推荐方案，并停下来问我选择 A/B/C 哪个。',
+      '',
+      '用户原始请求：',
+      text,
+    ].join('\n');
+  }
+  if (mode === 'ask') {
+    return [
+      '你现在处于 InvestClaw Ask 模式。',
+      '只回答问题和解释概念，不要执行工具、不要写文件、不要启动任务。',
+      '',
+      '用户原始请求：',
+      text,
+    ].join('\n');
+  }
+  return [
+    '你现在处于 InvestClaw Review 模式。',
+    '请审查、指出风险和改进建议。除非用户明确要求，否则不要执行工具、不要写文件、不要启动任务。',
+    '',
+    '用户原始请求：',
+    text,
+  ].join('\n');
 }
 
 function ensureSessionEntry(sessions: ChatSession[], sessionKey: string): ChatSession[] {
@@ -165,6 +199,7 @@ export function createRuntimeSendActions(set: ChatSet, get: ChatGet): Pick<Runti
       try {
         const idempotencyKey = crypto.randomUUID();
         const hasMedia = attachments && attachments.length > 0;
+        const outboundMessage = trimmed ? applyInteractionModePrompt(trimmed) : '';
         if (hasMedia) {
           console.log('[sendMessage] Media paths:', attachments!.map(a => a.stagedPath));
         }
@@ -193,7 +228,7 @@ export function createRuntimeSendActions(set: ChatSet, get: ChatGet): Pick<Runti
             'chat:sendWithMedia',
             {
               sessionKey: currentSessionKey,
-              message: trimmed || 'Process the attached file(s).',
+              message: outboundMessage || 'Process the attached file(s).',
               deliver: false,
               idempotencyKey,
               media: attachments.map((a) => ({
@@ -209,7 +244,7 @@ export function createRuntimeSendActions(set: ChatSet, get: ChatGet): Pick<Runti
             'chat.send',
             {
               sessionKey: currentSessionKey,
-              message: trimmed,
+              message: outboundMessage,
               deliver: false,
               idempotencyKey,
             },

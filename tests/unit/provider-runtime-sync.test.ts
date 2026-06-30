@@ -133,6 +133,14 @@ describe('provider-runtime-sync refresh strategy', () => {
     expect(gateway.debouncedRestart).not.toHaveBeenCalled();
   });
 
+  it('normalizes pasted OpenAI-compatible endpoint URLs to provider base URLs', async () => {
+    const { normalizeOpenAiCompatibleBaseUrl } = await import('@electron/services/providers/provider-url');
+
+    expect(normalizeOpenAiCompatibleBaseUrl('http://host.local/v1/models')).toBe('http://host.local/v1');
+    expect(normalizeOpenAiCompatibleBaseUrl('http://host.local/v1/chat/completions')).toBe('http://host.local/v1');
+    expect(normalizeOpenAiCompatibleBaseUrl('http://host.local/v1/responses')).toBe('http://host.local/v1');
+  });
+
   it('uses debouncedRestart after deleting provider config', async () => {
     const gateway = createGateway('running');
     await syncDeletedProviderToRuntime(createProvider(), 'moonshot', gateway as GatewayManager);
@@ -155,6 +163,44 @@ describe('provider-runtime-sync refresh strategy', () => {
     expect(mocks.removeProviderFromOpenClaw).toHaveBeenCalledWith('moonshot-cn');
     expect(mocks.removeProviderFromOpenClaw).toHaveBeenCalledTimes(2);
     expect(gateway.debouncedRestart).toHaveBeenCalledTimes(1);
+  });
+
+  it('syncs custom provider token limits to OpenClaw model registries', async () => {
+    const gateway = createGateway('running');
+    const customProvider = createProvider({
+      id: 'custom-glm',
+      name: 'GLM Local',
+      type: 'custom',
+      baseUrl: 'http://117.50.195.92:8080/gpt-oss-120b/glm5.1/v1/models',
+      model: 'GLM5.2',
+      contextWindow: 200000,
+      maxTokens: 10000,
+      apiProtocol: 'openai-completions',
+    });
+
+    await syncSavedProviderToRuntime(customProvider, 'sk-test', gateway as GatewayManager);
+
+    const expectedModelEntry = {
+      id: 'GLM5.2',
+      name: 'GLM5.2',
+      contextWindow: 200000,
+      maxTokens: 10000,
+    };
+    expect(mocks.syncProviderConfigToOpenClaw).toHaveBeenCalledWith(
+      'custom-customgl',
+      'GLM5.2',
+      expect.objectContaining({
+        baseUrl: 'http://117.50.195.92:8080/gpt-oss-120b/glm5.1/v1',
+        modelEntries: [expectedModelEntry],
+      }),
+    );
+    expect(mocks.updateAgentModelProvider).toHaveBeenCalledWith(
+      'custom-customgl',
+      expect.objectContaining({
+        baseUrl: 'http://117.50.195.92:8080/gpt-oss-120b/glm5.1/v1',
+        models: [expectedModelEntry],
+      }),
+    );
   });
 
   it('only clears the api-key profile when deleting a provider api key', async () => {

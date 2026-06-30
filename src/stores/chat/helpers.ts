@@ -122,6 +122,7 @@ function mimeFromExtension(filePath: string): string {
     'txt': 'text/plain',
     'csv': 'text/csv',
     'md': 'text/markdown',
+    'json': 'application/json',
     'rtf': 'application/rtf',
     'epub': 'application/epub+zip',
     // Archives
@@ -148,6 +149,17 @@ function mimeFromExtension(filePath: string): string {
   return map[ext] || 'application/octet-stream';
 }
 
+function isLikelyUsableLocalFilePath(filePath: string): boolean {
+  const trimmed = filePath.trim();
+  if (!trimmed) return false;
+  if (/[<>]/.test(trimmed)) return false;
+  if (/^https?:\/\//i.test(trimmed)) return false;
+  if (/^\/[^/\\]+$/u.test(trimmed)) return false;
+  if (/^~\/[^/\\]+$/u.test(trimmed)) return false;
+  if (/^[A-Za-z]:\\[^\\/:*?"<>|\r\n]+$/u.test(trimmed)) return false;
+  return /^(?:\/|~\/|[A-Za-z]:\\)/.test(trimmed);
+}
+
 /**
  * Extract raw file paths from message text.
  * Detects absolute paths (Unix: / or ~/, Windows: C:\ etc.) ending with common file extensions.
@@ -156,7 +168,7 @@ function mimeFromExtension(filePath: string): string {
 function extractRawFilePaths(text: string): Array<{ filePath: string; mimeType: string }> {
   const refs: Array<{ filePath: string; mimeType: string }> = [];
   const seen = new Set<string>();
-  const exts = 'png|jpe?g|gif|webp|bmp|avif|svg|pdf|docx?|xlsx?|pptx?|txt|csv|md|rtf|epub|zip|tar|gz|rar|7z|mp3|wav|ogg|aac|flac|m4a|mp4|mov|avi|mkv|webm|m4v';
+  const exts = 'png|jpe?g|gif|webp|bmp|avif|svg|pdf|docx?|xlsx?|pptx?|txt|csv|md|json|rtf|epub|zip|tar|gz|rar|7z|mp3|wav|ogg|aac|flac|m4a|mp4|mov|avi|mkv|webm|m4v';
   // Unix absolute paths (/... or ~/...) — lookbehind rejects mid-token slashes
   // (e.g. "path/to/file.mp4", "https://example.com/file.mp4")
   const unixRegex = new RegExp(`(?<![\\w./:])((?:\\/|~\\/)[^\\s\\n"'()\\[\\],<>]*?\\.(?:${exts}))`, 'gi');
@@ -166,9 +178,27 @@ function extractRawFilePaths(text: string): Array<{ filePath: string; mimeType: 
     let match;
     while ((match = regex.exec(text)) !== null) {
       const p = match[1];
-      if (p && !seen.has(p)) {
+      if (p && isLikelyUsableLocalFilePath(p) && !seen.has(p)) {
         seen.add(p);
         refs.push({ filePath: p, mimeType: mimeFromExtension(p) });
+      }
+    }
+  }
+  return refs;
+}
+
+function extractArtifactFilePaths(text: string): Array<{ filePath: string; mimeType: string }> {
+  const refs: Array<{ filePath: string; mimeType: string }> = [];
+  const seen = new Set<string>();
+  const artifactRegex = /\[artifact\s*:\s*([^\]]+)\]/gi;
+  let match;
+  while ((match = artifactRegex.exec(text)) !== null) {
+    const raw = match[1] ?? '';
+    for (const token of raw.split(/[,，\n]/).map((item) => item.trim()).filter(Boolean)) {
+      for (const ref of extractRawFilePaths(token)) {
+        if (seen.has(ref.filePath)) continue;
+        seen.add(ref.filePath);
+        refs.push(ref);
       }
     }
   }
@@ -392,7 +422,7 @@ function enrichWithToolResultFiles(messages: RawMessage[]): RawMessage[] {
  * Uses local cache for previews when available; missing previews are loaded async.
  */
 function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
-  return messages.map((msg, idx) => {
+  return messages.map((msg) => {
     // Only process user and assistant messages; skip if already enriched
     if ((msg.role !== 'user' && msg.role !== 'assistant') || msg._attachedFiles) return msg;
     const text = getMessageText(msg.content);
@@ -401,33 +431,12 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
     const mediaRefs = extractMediaRefs(text);
     const mediaRefPaths = new Set(mediaRefs.map(r => r.filePath));
 
-    // Path 2: Raw file paths.
-    // For assistant messages: scan own text AND the nearest preceding user message text,
-    // but only for non-tool-only assistant messages (i.e. the final answer turn).
-    // Tool-only messages (thinking + tool calls) should not show file previews — those
-    // belong to the final answer message that comes after the tool results.
-    // User messages never get raw-path previews so the image is not shown twice.
+    // Path 2: Explicit artifact paths only. Plain assistant text often contains
+    // diagnostics or directory listings; rendering every bare path as a card
+    // turns Agent Cluster transcripts into noisy artifact walls.
     let rawRefs: Array<{ filePath: string; mimeType: string }> = [];
     if (msg.role === 'assistant' && !isToolOnlyMessage(msg)) {
-      // Own text
-      rawRefs = extractRawFilePaths(text).filter(r => !mediaRefPaths.has(r.filePath));
-
-      // Nearest preceding user message text (look back up to 5 messages)
-      const seenPaths = new Set(rawRefs.map(r => r.filePath));
-      for (let i = idx - 1; i >= Math.max(0, idx - 5); i--) {
-        const prev = messages[i];
-        if (!prev) break;
-        if (prev.role === 'user') {
-          const prevText = getMessageText(prev.content);
-          for (const ref of extractRawFilePaths(prevText)) {
-            if (!mediaRefPaths.has(ref.filePath) && !seenPaths.has(ref.filePath)) {
-              seenPaths.add(ref.filePath);
-              rawRefs.push(ref);
-            }
-          }
-          break; // only use the nearest user message
-        }
-      }
+      rawRefs = extractArtifactFilePaths(text).filter(r => !mediaRefPaths.has(r.filePath));
     }
 
     const allRefs = [...mediaRefs, ...rawRefs];

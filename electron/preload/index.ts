@@ -127,6 +127,7 @@ const electronAPI = {
         // File staging & media
         'file:stage',
         'file:stageBuffer',
+        'file:readText',
         'media:getThumbnails',
         'media:saveImage',
         // Chat send with media (reads staged files in main process)
@@ -157,6 +158,8 @@ const electronAPI = {
         'gateway:notification',
         'gateway:channel-status',
         'gateway:chat-message',
+        'agent-cluster:updated',
+        'agent-cluster:creation-updated',
         'channel:whatsapp-qr',
         'channel:whatsapp-success',
         'channel:whatsapp-error',
@@ -207,6 +210,8 @@ const electronAPI = {
         'gateway:notification',
         'gateway:channel-status',
         'gateway:chat-message',
+        'agent-cluster:updated',
+        'agent-cluster:creation-updated',
         'channel:whatsapp-qr',
         'channel:whatsapp-success',
         'channel:whatsapp-error',

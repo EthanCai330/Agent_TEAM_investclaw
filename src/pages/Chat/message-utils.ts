@@ -221,3 +221,27 @@ export function formatTimestamp(timestamp: unknown): string {
 
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
+
+/**
+ * Format a timestamp for exact hover text.
+ */
+export function formatExactTimestamp(timestamp: unknown): string {
+  if (!timestamp) return '';
+  const ts = typeof timestamp === 'number' ? timestamp : Number(timestamp);
+  if (!ts || isNaN(ts)) return '';
+
+  const ms = ts > 1e12 ? ts : ts * 1000;
+  const date = new Date(ms);
+  if (isNaN(date.getTime())) return '';
+
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+  ].join('-') + ' ' + [
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+    pad(date.getSeconds()),
+  ].join(':');
+}
